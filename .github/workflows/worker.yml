@@ -3,6 +3,7 @@ name: qimingxing-worker
 on:
   schedule:
     # 每 5 分钟处理一次队列（GitHub Actions 免费：公共仓库不限分钟数）
+    # cron 仅在默认分支生效；如遇调度不触发，重新推送本文件可强制注册
     - cron: '*/5 * * * *'
   workflow_dispatch:   # 支持手动触发（测试用）
 
