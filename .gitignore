@@ -1,0 +1,19 @@
+# 密钥与环境变量（绝不可提交）
+.env
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# 运行时临时文件
+tmp/
+*.wav
+
+# 系统
+.DS_Store
+Thumbs.db

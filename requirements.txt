@@ -1,0 +1,7 @@
+# qimingxing ASR Worker 依赖
+psycopg[binary]>=3.1.0        # PostgreSQL 连接（SELECT ... FOR UPDATE SKIP LOCKED 抢单）
+requests>=2.31.0              # DashScope API + Supabase Storage 下载
+python-dotenv>=1.0.0          # 本地 .env 加载
+numpy>=1.26.0                 # 音频数组处理
+soundfile>=0.12.1             # 读取 16kHz mono WAV
+silero-vad>=5.1.2             # VAD 静音检测分段（onnx 模式，无需 torch）
