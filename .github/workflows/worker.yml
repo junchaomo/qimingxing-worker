@@ -9,7 +9,8 @@ on:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 依赖安装 + 任务处理需要足够时间；多个 run 可重叠，DB 行锁保证不重复处理
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
