@@ -69,8 +69,8 @@ class Settings:
     # 生产环境建议把 ffmpeg 装进系统 PATH；本地可显式指定 bin 目录
     FFMPEG_BIN_DIR: str = os.environ.get("FFMPEG_BIN_DIR", "")
 
-    # --- 说话人分离（pyannote.audio，可选） ---
-    ENABLE_SPEAKER_DIARIZATION: bool = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() in ("1", "true", "yes")
+    # --- 说话人分离（已取消，保留配置供后续使用） ---
+    ENABLE_SPEAKER_DIARIZATION: bool = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "false").lower() in ("1", "true", "yes")
     HUGGINGFACE_TOKEN: str = os.environ.get("HUGGINGFACE_TOKEN", "")
     # 超过此时长的音频跳过说话人分离（CPU 运行较慢）
     MAX_DIARIZATION_DURATION_S: int = _int("MAX_DIARIZATION_DURATION_S", 3600)

@@ -1,13 +1,11 @@
 """流式转写管线：长音频分段处理，每完成一段就实时更新结果。
 
-优化后的流程：
-1. 先并发转写所有段，每完成一段就立即更新结果（用户快速看到内容）
-2. 转写完成后，对整段音频做一次说话人分离（全局时间轴）
-3. 根据词级时间戳 + 全局说话人时间轴，逐词分配说话人
-4. 按说话人连续分段，生成对话格式结果
+流程：
+1. VAD 按静音处切分，每段约 30-60 秒
+2. 并发转写所有段，每完成一段就立即更新结果（用户快速看到内容）
+3. 所有段完成后，合并生成最终结果
 
-分段策略：
-- VAD 按静音处切分，每段约 30-60 秒
+注意：已取消 pyannote 说话人分离，只保留 Qwen3-ASR 纯转写。
 """
 import logging
 import os
@@ -24,7 +22,6 @@ import db
 from audio import load_wav, transcode_to_wav, trim_wav
 from asr_client import transcribe_segment
 from config import settings
-from diarization import diarize_audio
 from postprocess import aggregate_language, clean_text
 from srt import build_srt
 from storage import download
@@ -270,66 +267,11 @@ def run_task_streaming(task: dict) -> None:
                 db.update_partial_result(task_id, full_text, srt_text, total, done)
                 logger.info("task=%s 转写段 %d/%d 完成，已实时更新", task_id, done, total)
 
-        logger.info("task=%s 所有段转写完成，共收集 %d 个词级时间戳，开始整段说话人分离...", task_id, len(all_words))
+        logger.info("task=%s 所有段转写完成，共收集 %d 个词级时间戳", task_id, len(all_words))
 
-        # 6. 对整段音频做一次说话人分离（全局时间轴）
-        diarization = None
-        if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
-            logger.info("task=%s 说话人分离已启用，ENABLE_SPEAKER_DIARIZATION=%s, HUGGINGFACE_TOKEN=%s",
-                        task_id, settings.ENABLE_SPEAKER_DIARIZATION,
-                        "已配置" if settings.HUGGINGFACE_TOKEN else "未配置")
-            logger.info("task=%s 对整段音频（%.0fs）做说话人分离...", task_id, duration_s)
-
-            # 更新阶段为说话人分离
-            db.update_task_stage(task_id, "diarizing", 0.7)
-
-            # 启动进度估算线程（pyannote 没有进度回调，根据时间估算）
-            # 假设分离速度约 0.5 倍速（CPU 环境）
-            estimated_diarization_time = duration_s * 0.8
-            diarization_start = time.time()
-            diarization_done = threading.Event()
-
-            def update_diarization_progress():
-                """后台线程：根据已用时间估算分离进度。"""
-                while not diarization_done.is_set():
-                    elapsed = time.time() - diarization_start
-                    ratio = min(0.99, elapsed / estimated_diarization_time)
-                    progress = 0.7 + ratio * 0.29  # 0.7 -> 0.99
-                    try:
-                        db.update_task_stage(task_id, "diarizing", round(progress, 4))
-                    except Exception:
-                        pass
-                    time.sleep(2)
-
-            progress_thread = threading.Thread(target=update_diarization_progress, daemon=True)
-            progress_thread.start()
-
-            try:
-                diarization = diarize_audio(
-                    wav_path,
-                    settings.HUGGINGFACE_TOKEN,
-                    max_duration_s=max(duration_s + 60, 600),
-                    timeout_s=max(duration_s * 2, 300),
-                )
-            finally:
-                diarization_done.set()
-                progress_thread.join(timeout=1)
-
-            if diarization:
-                speaker_count = len(set(d[2] for d in diarization))
-                logger.info(
-                    "task=%s 说话人分离完成，共 %d 个片段，%d 个说话人",
-                    task_id, len(diarization), speaker_count,
-                )
-            else:
-                logger.warning("task=%s 说话人分离失败或跳过，使用无标签格式", task_id)
-        else:
-            logger.info("task=%s 说话人分离未启用", task_id)
-
-        # 7. 生成带说话人标签的最终结果
-        logger.info("task=%s 开始生成最终结果，all_words=%d, diarization=%s",
-                    task_id, len(all_words), "有" if diarization else "无")
-        full_text, srt_text = build_result_with_speakers(all_words, diarization)
+        # 6. 生成最终结果（纯文本，无说话人分离）
+        logger.info("task=%s 开始生成最终结果，all_words=%d", task_id, len(all_words))
+        full_text, srt_text = build_result_simple(results, seg_paths)
         detected_lang = aggregate_language(lang_list) or language
         logger.info("task=%s 最终结果生成完成，文本长度=%d", task_id, len(full_text))
 
@@ -340,9 +282,8 @@ def run_task_streaming(task: dict) -> None:
             db.insert_usage_record(audio_file["user_id"], task_id, duration_s)
 
         logger.info(
-            "task=%s 流式转写完成，语言=%s，时长=%ss，共 %d 段，说话人=%s",
+            "task=%s 转写完成，语言=%s，时长=%ss，共 %d 段",
             task_id, detected_lang, duration_s, total,
-            "已分离" if diarization else "未分离",
         )
 
     finally:
