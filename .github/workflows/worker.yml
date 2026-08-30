@@ -25,7 +25,10 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          # silero-vad 使用 ONNX 模式，不需要 torch，用 --no-deps 避免安装庞大的 torch 依赖
+          pip install silero-vad --no-deps
 
       - name: Run ASR worker
         env:
