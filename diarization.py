@@ -89,10 +89,27 @@ def diarize_audio(
         logger.info("开始说话人分离...")
         diarization = pipeline(wav_path)
 
-        # 解析结果
+        # 解析结果（兼容不同版本的 pyannote.audio）
         results = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
-            results.append((turn.start, turn.end, speaker))
+        try:
+            # 新版本：DiarizeOutput 对象，尝试获取 annotation
+            if hasattr(diarization, "annotation"):
+                annotation = diarization.annotation
+            elif hasattr(diarization, "diarization"):
+                annotation = diarization.diarization
+            else:
+                annotation = diarization
+
+            for turn, _, speaker in annotation.itertracks(yield_label=True):
+                results.append((turn.start, turn.end, speaker))
+        except AttributeError:
+            # 旧版本或其他格式，尝试直接迭代
+            try:
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    results.append((turn.start, turn.end, speaker))
+            except Exception:
+                logger.warning("无法解析说话人分离结果格式")
+                return None
 
         elapsed = time.time() - start_time
         logger.info(
