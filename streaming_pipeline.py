@@ -198,7 +198,10 @@ def run_task_streaming(task: dict) -> None:
             )
             logger.info("task=%s 已生成签名 URL", task_id)
 
-            db.update_task_stage(task_id, "processing", 0.1)
+            # `stage` 是用于前端展示的细分阶段，不等同于任务的
+            # `status`。数据库仅允许 transcribing / diarizing / completed；
+            # 写入 processing 会触发约束错误并让任务反复重试。
+            db.update_task_stage(task_id, "transcribing", 0.1)
 
             # 调用 Filetrans
             start_time = time.time()
@@ -291,3 +294,4 @@ def run_task_streaming(task: dict) -> None:
                 logger.info("已清理临时音频: %s", temp_storage_path)
             except Exception as e:
                 logger.warning("清理临时音频失败: %s", e)
+
