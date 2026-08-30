@@ -150,13 +150,22 @@ def build_result_with_speakers(
     diarization: list[tuple[float, float, str]] | None,
 ) -> tuple[str, str]:
     """说话人分离完成后，生成带说话人标签的结果。"""
+    logger.info("生成结果：词数=%d, 说话人分离片段=%d", len(all_words), len(diarization) if diarization else 0)
+
+    if not all_words:
+        logger.warning("词级时间戳为空，无法生成对话格式，使用纯文本")
+        return "", ""
+
     if not diarization:
         # 没有说话人分离结果，用简单格式
+        logger.warning("没有说话人分离结果，使用无标签格式")
         text = clean_text("".join(w[2] for w in sorted(all_words, key=lambda x: x[0])))
         return text, ""
 
     speaker_map = map_speaker_labels(diarization)
+    logger.info("说话人映射: %s", speaker_map)
     segments = build_dialogue_from_words(all_words, diarization, speaker_map)
+    logger.info("生成对话分段数=%d", len(segments))
 
     # 生成 markdown 文本
     full_text = format_dialogue_text(segments)
@@ -261,11 +270,14 @@ def run_task_streaming(task: dict) -> None:
                 db.update_partial_result(task_id, full_text, srt_text, total, done)
                 logger.info("task=%s 转写段 %d/%d 完成，已实时更新", task_id, done, total)
 
-        logger.info("task=%s 所有段转写完成，开始整段说话人分离...", task_id)
+        logger.info("task=%s 所有段转写完成，共收集 %d 个词级时间戳，开始整段说话人分离...", task_id, len(all_words))
 
         # 6. 对整段音频做一次说话人分离（全局时间轴）
         diarization = None
         if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
+            logger.info("task=%s 说话人分离已启用，ENABLE_SPEAKER_DIARIZATION=%s, HUGGINGFACE_TOKEN=%s",
+                        task_id, settings.ENABLE_SPEAKER_DIARIZATION,
+                        "已配置" if settings.HUGGINGFACE_TOKEN else "未配置")
             logger.info("task=%s 对整段音频（%.0fs）做说话人分离...", task_id, duration_s)
 
             # 更新阶段为说话人分离

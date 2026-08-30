@@ -101,6 +101,10 @@ def _parse(data: dict) -> tuple[str, str | None, list[tuple[float, float, str]]]
     # 解析词级时间戳
     sentence = data.get("sentence") or (data.get("output") or {}).get("sentence")
     words = _parse_words(sentence)
+    logger.info("ASR响应解析：文本长度=%d, 词数=%d, sentence存在=%s",
+                len(data.get("text", "")), len(words), sentence is not None)
+    if words:
+        logger.info("前3个词: %s", words[:3])
 
     # 新格式：顶层 / output.text
     text = data.get("text") or (data.get("output") or {}).get("text") or ""
