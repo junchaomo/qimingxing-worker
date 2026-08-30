@@ -88,28 +88,41 @@ def diarize_audio(
     try:
         logger.info("开始说话人分离...")
         diarization = pipeline(wav_path)
+        logger.info("说话人分离返回对象类型: %s", type(diarization))
+        logger.info("返回对象属性: %s", dir(diarization))
 
         # 解析结果（兼容不同版本的 pyannote.audio）
         results = []
         try:
+            # 尝试直接打印对象内容
+            logger.info("返回对象内容: %s", str(diarization)[:500])
+
             # 新版本：DiarizeOutput 对象，尝试获取 annotation
             if hasattr(diarization, "annotation"):
                 annotation = diarization.annotation
+                logger.info("使用 diarization.annotation，类型: %s", type(annotation))
             elif hasattr(diarization, "diarization"):
                 annotation = diarization.diarization
+                logger.info("使用 diarization.diarization，类型: %s", type(annotation))
             else:
                 annotation = diarization
+                logger.info("直接使用返回对象，类型: %s", type(annotation))
 
             for turn, _, speaker in annotation.itertracks(yield_label=True):
                 results.append((turn.start, turn.end, speaker))
-        except AttributeError:
+        except AttributeError as e:
+            logger.warning("AttributeError解析失败: %s", e)
             # 旧版本或其他格式，尝试直接迭代
             try:
                 for turn, _, speaker in diarization.itertracks(yield_label=True):
                     results.append((turn.start, turn.end, speaker))
-            except Exception:
-                logger.warning("无法解析说话人分离结果格式")
+            except Exception as e2:
+                logger.warning("直接迭代也失败: %s", e2)
+                logger.warning("无法解析说话人分离结果格式，对象类型=%s", type(diarization))
                 return None
+        except Exception as e:
+            logger.warning("解析说话人分离结果时出错: %s, 对象类型=%s", e, type(diarization))
+            return None
 
         elapsed = time.time() - start_time
         logger.info(
