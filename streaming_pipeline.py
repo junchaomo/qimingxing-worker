@@ -25,29 +25,9 @@ from diarization import assign_speaker_to_segment, diarize_audio
 from postprocess import aggregate_language, clean_text
 from srt import build_srt
 from storage import download
+from vad import segment_audio
 
 logger = logging.getLogger("worker.streaming")
-
-# 流式分段参数
-STREAM_SEGMENT_S = 75      # 每段目标时长（秒）
-STREAM_OVERLAP_S = 3       # 相邻段重叠时长（秒）
-
-
-def split_audio_streaming(wav: np.ndarray, sample_rate: int = 16000) -> list[tuple[int, int, np.ndarray]]:
-    """把长音频切成固定时长的段，相邻段重叠。"""
-    seg_samples = STREAM_SEGMENT_S * sample_rate
-    overlap_samples = STREAM_OVERLAP_S * sample_rate
-    step = seg_samples - overlap_samples
-
-    segments = []
-    start = 0
-    while start < len(wav):
-        end = min(start + seg_samples, len(wav))
-        segments.append((start, end, wav[start:end]))
-        if end >= len(wav):
-            break
-        start += step
-    return segments
 
 
 def align_speakers(
@@ -159,9 +139,9 @@ def run_task_streaming(task: dict) -> None:
         duration_s = int(round(len(wav) / 16000.0))
         db.update_audio_duration(audio_file_id, duration_s)
 
-        segments = split_audio_streaming(wav)
+        segments = segment_audio(wav)
         total = len(segments)
-        logger.info("task=%s 流式分段共 %d 段（每段约 %ds）", task_id, total, STREAM_SEGMENT_S)
+        logger.info("task=%s VAD分段共 %d 段（按静音处切分）", task_id, total)
         db.update_progress(task_id, total, 0)
 
         # 4. 落盘每段为独立 wav
@@ -206,7 +186,7 @@ def run_task_streaming(task: dict) -> None:
                 diar = diarize_audio(
                     seg_file,
                     settings.HUGGINGFACE_TOKEN,
-                    max_duration_s=STREAM_SEGMENT_S + 10,
+                    max_duration_s=settings.MAX_SEGMENT_S + 10,
                     timeout_s=120,
                 )
                 segment_diarizations.append(diar)
