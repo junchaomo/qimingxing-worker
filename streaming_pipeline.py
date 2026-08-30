@@ -101,7 +101,7 @@ def build_result(
         _, seg_start, seg_end, _ = seg_paths[seg_idx]
         merged_texts.append(text)
 
-        # 分配说话人
+        # 分配说话人（diar 中的时间是相对于段开始的，所以传入 0）
         speaker = None
         if segment_diarizations and speaker_mappings:
             diar = segment_diarizations[seg_idx]
