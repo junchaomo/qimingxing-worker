@@ -70,6 +70,26 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
     if not sentences:
         return "", ""
 
+    # 为每个不同的 speaker_id 分配一个字母标签（A, B, C...）
+    speaker_map: dict[str, str] = {}
+    speaker_counter = 0
+
+    def get_speaker_label(speaker_id) -> str:
+        nonlocal speaker_counter
+        if speaker_id is None:
+            return "Speaker"
+        key = str(speaker_id)
+        if key not in speaker_map:
+            label = chr(65 + speaker_counter) if speaker_counter < 26 else f"S{speaker_counter + 1}"
+            speaker_map[key] = label
+            speaker_counter += 1
+        return speaker_map[key]
+
+    # 先输出调试日志，看看 speaker_id 的实际格式
+    sample_speakers = [s.get("speaker_id") for s in sentences[:10]]
+    logger.info("说话人ID样本: %s", sample_speakers)
+    logger.info("不同说话人数: %d", len(set(str(s.get("speaker_id")) for s in sentences if s.get("speaker_id") is not None)))
+
     dialogue_segments = []
     current_speaker = None
     current_text = ""
@@ -85,7 +105,7 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
         if speaker != current_speaker:
             if current_speaker is not None and current_text:
                 dialogue_segments.append({
-                    "speaker": current_speaker,
+                    "speaker": get_speaker_label(current_speaker),
                     "text": current_text.strip(),
                     "start": current_start,
                     "end": current_end,
@@ -100,7 +120,7 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
 
     if current_speaker is not None and current_text:
         dialogue_segments.append({
-            "speaker": current_speaker,
+            "speaker": get_speaker_label(current_speaker),
             "text": current_text.strip(),
             "start": current_start,
             "end": current_end,
@@ -109,9 +129,8 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
     # Markdown
     md_lines = []
     for seg in dialogue_segments:
-        speaker_label = f"Speaker {chr(65 + seg['speaker'])}" if seg["speaker"] is not None else "Speaker"
         time_str = f"{int(seg['start']//60):02d}:{int(seg['start']%60):02d}"
-        md_lines.append(f"**{speaker_label}** ({time_str})\n\n{seg['text']}\n")
+        md_lines.append(f"**{seg['speaker']}** ({time_str})\n\n{seg['text']}\n")
     full_text = "\n".join(md_lines)
 
     # SRT
@@ -125,10 +144,9 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
         end_m = int((seg["end"] % 3600) // 60)
         end_s = int(seg["end"] % 60)
         end_ms = int((seg["end"] % 1) * 1000)
-        speaker_label = f"Speaker {chr(65 + seg['speaker'])}" if seg["speaker"] is not None else "Speaker"
         srt_lines.append(f"{i}")
         srt_lines.append(f"{start_h:02d}:{start_m:02d}:{start_s:02d},{start_ms:03d} --> {end_h:02d}:{end_m:02d}:{end_s:02d},{end_ms:03d}")
-        srt_lines.append(f"{speaker_label}: {seg['text']}")
+        srt_lines.append(f"{seg['speaker']}: {seg['text']}")
         srt_lines.append("")
     srt_text = "\n".join(srt_lines)
 
