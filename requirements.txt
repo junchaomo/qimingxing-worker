@@ -5,3 +5,7 @@ python-dotenv>=1.0.0          # 本地 .env 加载
 numpy>=1.26.0                 # 音频数组处理
 soundfile>=0.12.1             # 读取 16kHz mono WAV
 silero-vad>=5.1.2             # VAD 静音检测分段（onnx 模式，无需 torch）
+
+# 说话人分离（可选，默认禁用，通过 ENABLE_SPEAKER_DIARIZATION=true 启用）
+pyannote.audio>=3.1.1        # 说话人分离（需要 torch，安装较慢，CPU 运行较慢）
+torch>=2.0.0                  # pyannote.audio 依赖

@@ -13,14 +13,27 @@ def _ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{mss:03d}"
 
 
-def build_srt(segments: list[tuple[int, float, float, str]]) -> str:
-    """segments: [(index, start_s, end_s, text), ...] -> SRT 全文。"""
+def build_srt(
+    segments: list[tuple[int, float, float, str]],
+    speakers: list[str] | None = None,
+) -> str:
+    """segments: [(index, start_s, end_s, text), ...] -> SRT 全文。
+
+    Args:
+        segments: 片段列表
+        speakers: 每个片段的说话人标签（可选，长度与 segments 一致）
+    """
     lines = []
-    for idx, start, end, text in sorted(segments, key=lambda x: x[0]):
+    sorted_segs = sorted(segments, key=lambda x: x[0])
+    for i, (idx, start, end, text) in enumerate(sorted_segs):
         if not text:
             continue
         lines.append(str(idx + 1))
         lines.append(f"{_ts(start)} --> {_ts(end)}")
-        lines.append(text.strip())
+        # 添加说话人标签
+        if speakers and i < len(speakers) and speakers[i]:
+            lines.append(f"[{speakers[i]}] {text.strip()}")
+        else:
+            lines.append(text.strip())
         lines.append("")
     return "\n".join(lines)

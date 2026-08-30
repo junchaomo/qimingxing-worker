@@ -50,10 +50,10 @@ class Settings:
     GLOBAL_API_SEMAPHORE: int = _int("GLOBAL_API_SEMAPHORE", 16)  # 全局同时进行的 API 请求上限
 
     # --- VAD 分段 ---
-    VAD_SEGMENT_THRESHOLD_S: int = _int("VAD_SEGMENT_THRESHOLD_S", 120)  # 目标分段时长
-    MAX_SEGMENT_S: int = _int("MAX_SEGMENT_S", 180)                      # 单段硬上限（qwen-audio-3.0-asr-flash 支持 5 分钟，留足余量）
-    MIN_SPEECH_MS: int = _int("MIN_SPEECH_MS", 1500)
-    MIN_SILENCE_MS: int = _int("MIN_SILENCE_MS", 500)
+    VAD_SEGMENT_THRESHOLD_S: int = _int("VAD_SEGMENT_THRESHOLD_S", 30)   # 目标分段时长（按句子切分）
+    MAX_SEGMENT_S: int = _int("MAX_SEGMENT_S", 60)                       # 单段硬上限（1分钟，更细粒度）
+    MIN_SPEECH_MS: int = _int("MIN_SPEECH_MS", 500)                      # 最短语音段
+    MIN_SILENCE_MS: int = _int("MIN_SILENCE_MS", 300)                     # 静音检测阈值
 
     # --- 轮询与重试 ---
     POLL_INTERVAL_S: float = _float("POLL_INTERVAL_S", 5.0)  # Worker 扫描队列间隔
@@ -67,6 +67,14 @@ class Settings:
     # --- FFmpeg 定位 ---
     # 生产环境建议把 ffmpeg 装进系统 PATH；本地可显式指定 bin 目录
     FFMPEG_BIN_DIR: str = os.environ.get("FFMPEG_BIN_DIR", "")
+
+    # --- 说话人分离（pyannote.audio，可选） ---
+    ENABLE_SPEAKER_DIARIZATION: bool = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() in ("1", "true", "yes")
+    HUGGINGFACE_TOKEN: str = os.environ.get("HUGGINGFACE_TOKEN", "")
+    # 超过此时长的音频跳过说话人分离（CPU 运行较慢）
+    MAX_DIARIZATION_DURATION_S: int = _int("MAX_DIARIZATION_DURATION_S", 3600)
+    # 说话人分离超时时间
+    DIARIZATION_TIMEOUT_S: int = _int("DIARIZATION_TIMEOUT_S", 600)
 
 
 settings = Settings()

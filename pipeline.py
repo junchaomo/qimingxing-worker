@@ -8,9 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import soundfile as sf
 
 import db
-from audio import load_wav, transcode_to_wav
+from audio import load_wav, transcode_to_wav, trim_wav
 from asr_client import transcribe_segment
 from config import settings
+from diarization import assign_speaker_to_segment, diarize_audio
 from postprocess import aggregate_language, clean_text, merge_text
 from srt import build_srt
 from storage import download
@@ -24,6 +25,8 @@ def run_task(task: dict) -> None:
     task_id = task["id"]
     audio_file_id = task["audio_file_id"]
     language = task.get("language")  # 可为 None（自动识别）
+    trim_start = task.get("trim_start")
+    trim_end = task.get("trim_end")
 
     workdir = os.path.join(settings.TMP_DIR, f"{task_id}_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)
@@ -37,6 +40,43 @@ def run_task(task: dict) -> None:
         # 2. 统一转码 16kHz mono WAV
         wav_path = os.path.join(workdir, "full.wav")
         transcode_to_wav(raw_path, wav_path)
+
+        # 2.5 音频裁剪（如果指定了 trim_start / trim_end）
+        if trim_start is not None or trim_end is not None:
+            trimmed_path = os.path.join(workdir, "trimmed.wav")
+            start = float(trim_start) if trim_start is not None else 0.0
+            # 如果没有指定 end，先探测时长
+            if trim_end is not None:
+                end = float(trim_end)
+            else:
+                from audio import probe_duration
+                end = probe_duration(wav_path)
+            if end > start:
+                trim_wav(wav_path, trimmed_path, start, end)
+                wav_path = trimmed_path
+                logger.info("task=%s 已裁剪 %.1fs - %.1fs", task_id, start, end)
+            else:
+                logger.warning("task=%s 裁剪参数无效 (start=%.1f, end=%.1f)，跳过裁剪", task_id, start, end)
+
+        # 2.5 说话人分离（可选，短音频启用）
+        diarization_result = None
+        if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
+            logger.info("task=%s 开始说话人分离", task_id)
+            diarization_result = diarize_audio(
+                wav_path,
+                settings.HUGGINGFACE_TOKEN,
+                max_duration_s=settings.MAX_DIARIZATION_DURATION_S,
+                timeout_s=settings.DIARIZATION_TIMEOUT_S,
+            )
+            if diarization_result:
+                logger.info(
+                    "task=%s 说话人分离成功，%d 个片段，%d 个说话人",
+                    task_id,
+                    len(diarization_result),
+                    len(set(r[2] for r in diarization_result)),
+                )
+            else:
+                logger.info("task=%s 说话人分离跳过或失败，使用启发式 A/B 算法", task_id)
 
         # 3. VAD 分段
         wav = load_wav(wav_path)
@@ -76,10 +116,21 @@ def run_task(task: dict) -> None:
         # 6. 合并 + 清洗 + 语言判定 + SRT
         full_text = clean_text(merge_text(results))
         detected_lang = aggregate_language(lang_list) or language
+
+        # 为每个片段分配说话人
+        sorted_results = sorted(results, key=lambda x: x[0])
+        speakers = []
+        for (idx, text), (seg_idx, start, end, _) in zip(sorted_results, seg_paths):
+            if diarization_result:
+                speaker = assign_speaker_to_segment(start, end, diarization_result)
+            else:
+                speaker = None  # 前端使用启发式 A/B 算法
+            speakers.append(speaker)
+
         srt_text = build_srt([
             (idx, start, end, text)
-            for (idx, text), (seg_idx, start, end, _) in zip(sorted(results), seg_paths)
-        ])
+            for (idx, text), (seg_idx, start, end, _) in zip(sorted_results, seg_paths)
+        ], speakers=speakers)
 
         # 7. 回写
         db.mark_task_completed(task_id, full_text, srt_text, total)

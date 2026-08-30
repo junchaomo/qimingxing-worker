@@ -65,3 +65,36 @@ def load_wav(path: str):
     if data.ndim > 1:
         data = data.mean(axis=1)
     return data
+
+
+def trim_wav(src: str, dst: str, start_sec: float, end_sec: float) -> str:
+    """裁剪 WAV 文件：保留 [start_sec, end_sec] 时间段。
+
+    Args:
+        src: 源 WAV 文件路径
+        dst: 目标 WAV 文件路径
+        start_sec: 开始时间（秒）
+        end_sec: 结束时间（秒）
+
+    Returns:
+        目标文件路径
+    """
+    ffmpeg = _cmd("ffmpeg")
+    duration = end_sec - start_sec
+    cmd = [
+        ffmpeg, "-y",
+        "-i", src,
+        "-ss", str(start_sec),
+        "-t", str(duration),
+        "-ar", str(SAMPLE_RATE),
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        "-f", "wav",
+        dst,
+    ]
+    logger.info("trimming %s -> %s (%.1fs - %.1fs, duration %.1fs)",
+                src, dst, start_sec, end_sec, duration)
+    proc = subprocess.run(cmd, capture_output=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg 裁剪失败: {proc.stderr.decode('utf-8', errors='ignore')[-2000:]}")
+    return dst
