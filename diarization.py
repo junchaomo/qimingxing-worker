@@ -27,9 +27,9 @@ def _load_pipeline(hf_token: str):
     try:
         from pyannote.audio import Pipeline
 
-        logger.info("加载 pyannote.audio 说话人分离模型...")
+        logger.info("加载 pyannote.audio 说话人分离模型 (community-1)...")
         _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
+            "pyannote/speaker-diarization-community-1",
             token=hf_token,
         )
         _pipeline_loaded = True

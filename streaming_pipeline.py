@@ -327,10 +327,14 @@ def run_task_streaming(task: dict) -> None:
             logger.info("task=%s 说话人分离未启用", task_id)
 
         # 7. 生成带说话人标签的最终结果
+        logger.info("task=%s 开始生成最终结果，all_words=%d, diarization=%s",
+                    task_id, len(all_words), "有" if diarization else "无")
         full_text, srt_text = build_result_with_speakers(all_words, diarization)
         detected_lang = aggregate_language(lang_list) or language
+        logger.info("task=%s 最终结果生成完成，文本长度=%d", task_id, len(full_text))
 
         db.mark_task_completed(task_id, full_text, srt_text, total)
+        logger.info("task=%s 任务已标记为完成，progress=1.0", task_id)
 
         if audio_file["user_id"]:
             db.insert_usage_record(audio_file["user_id"], task_id, duration_s)
