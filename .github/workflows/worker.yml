@@ -25,12 +25,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          # 安装 torch CPU 版本（silero-vad 需要，但不需要庞大的 CUDA 版本）
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # silero-vad 用 --no-deps 避免重复安装依赖
-          pip install silero-vad --no-deps
+        run: pip install -r requirements.txt
 
       - name: Run ASR worker
         env:
