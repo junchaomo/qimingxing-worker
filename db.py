@@ -138,20 +138,41 @@ def update_progress(task_id: str, total: int, completed: int) -> None:
             )
 
 
-def update_partial_result(task_id: str, result_text: str, result_srt: str, total: int, completed: int) -> None:
+def update_partial_result(task_id: str, result_text: str, result_srt: str, total: int, completed: int, stage: str = "transcribing") -> None:
     """流式更新：每完成一段就更新部分结果，任务状态保持 processing。"""
     with get_conn() as conn:
         with conn.transaction():
+            # 转写阶段占 70% 进度，说话人分离阶段占 30%
+            if stage == "transcribing":
+                progress = 0.0 if total == 0 else round(completed / total * 0.7, 4)
+            else:
+                progress = 0.7  # 分离阶段起始进度
             conn.execute(
                 """
                 update transcription_tasks
                 set result_text=%s, result_srt=%s,
                     total_segments=%s, completed_segments=%s,
-                    progress = case when %s = 0 then 0 else round(%s::numeric / %s, 4) end
+                    progress=%s, stage=%s
                 where id=%s
                 """,
-                (result_text, result_srt, total, completed, total, completed, total, task_id),
+                (result_text, result_srt, total, completed, progress, stage, task_id),
             )
+
+
+def update_task_stage(task_id: str, stage: str, progress: float | None = None) -> None:
+    """更新任务阶段和可选的进度。"""
+    with get_conn() as conn:
+        with conn.transaction():
+            if progress is not None:
+                conn.execute(
+                    "update transcription_tasks set stage=%s, progress=%s where id=%s",
+                    (stage, progress, task_id),
+                )
+            else:
+                conn.execute(
+                    "update transcription_tasks set stage=%s where id=%s",
+                    (stage, task_id),
+                )
 
 
 def get_audio_file(audio_file_id: str) -> dict | None:

@@ -12,6 +12,8 @@
 import logging
 import os
 import shutil
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -265,12 +267,42 @@ def run_task_streaming(task: dict) -> None:
         diarization = None
         if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
             logger.info("task=%s 对整段音频（%.0fs）做说话人分离...", task_id, duration_s)
-            diarization = diarize_audio(
-                wav_path,
-                settings.HUGGINGFACE_TOKEN,
-                max_duration_s=max(duration_s + 60, 600),  # 放宽时长限制
-                timeout_s=max(duration_s * 2, 300),  # 超时时间根据时长调整
-            )
+
+            # 更新阶段为说话人分离
+            db.update_task_stage(task_id, "diarizing", 0.7)
+
+            # 启动进度估算线程（pyannote 没有进度回调，根据时间估算）
+            # 假设分离速度约 0.5 倍速（CPU 环境）
+            estimated_diarization_time = duration_s * 0.8
+            diarization_start = time.time()
+            diarization_done = threading.Event()
+
+            def update_diarization_progress():
+                """后台线程：根据已用时间估算分离进度。"""
+                while not diarization_done.is_set():
+                    elapsed = time.time() - diarization_start
+                    ratio = min(0.99, elapsed / estimated_diarization_time)
+                    progress = 0.7 + ratio * 0.29  # 0.7 -> 0.99
+                    try:
+                        db.update_task_stage(task_id, "diarizing", round(progress, 4))
+                    except Exception:
+                        pass
+                    time.sleep(2)
+
+            progress_thread = threading.Thread(target=update_diarization_progress, daemon=True)
+            progress_thread.start()
+
+            try:
+                diarization = diarize_audio(
+                    wav_path,
+                    settings.HUGGINGFACE_TOKEN,
+                    max_duration_s=max(duration_s + 60, 600),
+                    timeout_s=max(duration_s * 2, 300),
+                )
+            finally:
+                diarization_done.set()
+                progress_thread.join(timeout=1)
+
             if diarization:
                 speaker_count = len(set(d[2] for d in diarization))
                 logger.info(
