@@ -105,7 +105,7 @@ def run_task(task: dict) -> None:
             }
             for fut in as_completed(futures):
                 idx, start, end = futures[fut]
-                text, seg_lang = fut.result()  # 失败会抛异常，整任务走重试
+                text, seg_lang, _words = fut.result()  # 失败会抛异常，整任务走重试
                 results.append((idx, text))
                 lang_list.append(seg_lang)
                 done += 1

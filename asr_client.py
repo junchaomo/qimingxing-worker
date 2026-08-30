@@ -71,20 +71,41 @@ def _call_once(wav_path: str, language: str | None) -> dict:
     return resp.json()
 
 
-def _parse(data: dict) -> tuple[str, str | None]:
-    """从响应中解析 (text, language)。
+def _parse_words(sentence: dict | None) -> list[tuple[float, float, str]]:
+    """从 sentence 中解析词级时间戳。"""
+    if not sentence or not isinstance(sentence, dict):
+        return []
+    word_list = sentence.get("words") or []
+    words: list[tuple[float, float, str]] = []
+    for w in word_list:
+        if not isinstance(w, dict):
+            continue
+        start = w.get("begin_time") or w.get("start") or 0
+        end = w.get("end_time") or w.get("end") or start
+        text = w.get("text") or w.get("word") or ""
+        if not text:
+            continue
+        # 时间单位可能是毫秒或秒，根据数值判断
+        if start > 1000:
+            start = start / 1000.0
+            end = end / 1000.0
+        words.append((float(start), float(end), str(text)))
+    return words
 
-    qwen-audio-3.0-asr-flash 非流式响应结构：
-      {"sentence": {...}, "text": "...", "request_id": "...",
-       "output": {"sentence": {...}, "text": "...", "request_id": "..."},
-       "usage": {"duration": N}}
-    转写全文位于顶层 text 或 output.text；sentence.words 提供词级时间戳。
-    language 不在响应中上报（模型自动识别），返回 None。
+
+def _parse(data: dict) -> tuple[str, str | None, list[tuple[float, float, str]]]:
+    """从响应中解析 (text, language, words)。
+
+    words 格式：[(start_s, end_s, word), ...]，时间相对于该段开始。
     """
+    # 解析词级时间戳
+    sentence = data.get("sentence") or (data.get("output") or {}).get("sentence")
+    words = _parse_words(sentence)
+
     # 新格式：顶层 / output.text
     text = data.get("text") or (data.get("output") or {}).get("text") or ""
     if text:
-        return text, None
+        return text, None, words
 
     # 旧格式兜底：output.choices[0].message.content[0].text
     try:
@@ -97,13 +118,15 @@ def _parse(data: dict) -> tuple[str, str | None]:
             if ann.get("type") == "audio_info":
                 language = ann.get("language")
                 break
-        return text, language
+        return text, language, words
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(f"DashScope 响应解析失败: {str(data)[:800]}") from None
 
 
-def transcribe_segment(wav_path: str, language: str | None = None) -> tuple[str, str | None]:
-    """转写单个段，带全局限流与指数退避重试。返回 (text, language)。"""
+def transcribe_segment(
+    wav_path: str, language: str | None = None
+) -> tuple[str, str | None, list[tuple[float, float, str]]]:
+    """转写单个段，带全局限流与指数退避重试。返回 (text, language, words)。"""
     if not settings.DASHSCOPE_API_KEY:
         raise RuntimeError("DASHSCOPE_API_KEY 未配置")
 
