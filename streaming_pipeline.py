@@ -1,13 +1,12 @@
 """流式转写管线：长音频分段处理，每完成一段就实时更新结果。
 
-与 pipeline.py 的区别：
-- pipeline.py：全部处理完才一次性写入结果
-- streaming_pipeline.py：每完成一段就更新数据库，用户可以实时看到进展
+优化后的流程：
+1. 先并发转写所有段，每完成一段就立即更新结果（用户快速看到内容）
+2. 转写完成后，再做说话人分离（后台进行，不阻塞用户）
+3. 说话人分离完成后，更新说话人标签
 
 分段策略：
-- 每段 60-90 秒，重叠 3 秒（避免截断句子）
-- 每段独立做 pyannote.audio 说话人分离
-- 说话人对齐：基于出现顺序和交替模式
+- 每段 75 秒，重叠 3 秒（避免截断句子）
 """
 import logging
 import os
@@ -35,11 +34,7 @@ STREAM_OVERLAP_S = 3       # 相邻段重叠时长（秒）
 
 
 def split_audio_streaming(wav: np.ndarray, sample_rate: int = 16000) -> list[tuple[int, int, np.ndarray]]:
-    """把长音频切成固定时长的段，相邻段重叠。
-
-    Returns:
-        [(start_sample, end_sample, segment), ...]
-    """
+    """把长音频切成固定时长的段，相邻段重叠。"""
     seg_samples = STREAM_SEGMENT_S * sample_rate
     overlap_samples = STREAM_OVERLAP_S * sample_rate
     step = seg_samples - overlap_samples
@@ -58,29 +53,16 @@ def split_audio_streaming(wav: np.ndarray, sample_rate: int = 16000) -> list[tup
 def align_speakers(
     segment_diarizations: list[list[tuple[float, float, str]] | None],
 ) -> list[dict[str, str]]:
-    """对齐不同段的说话人标签。
-
-    简单策略：
-    - 第一段：SPEAKER_00 -> A, SPEAKER_01 -> B
-    - 后续段：根据说话人出现的顺序映射
-    - 如果某段只有一个说话人，沿用前一段的映射
-
-    Args:
-        segment_diarizations: 每段的说话人分离结果（可能为 None）
-
-    Returns:
-        每段的说话人映射字典，如 [{"SPEAKER_00": "A", "SPEAKER_01": "B"}, ...]
-    """
+    """对齐不同段的说话人标签。"""
     mappings = []
     current_map: dict[str, str] = {}
-    next_label = 0  # 0=A, 1=B
+    next_label = 0
 
     for diar in segment_diarizations:
         if not diar:
             mappings.append(dict(current_map))
             continue
 
-        # 收集该段出现的所有说话人（按首次出现顺序）
         speakers_in_order = []
         seen = set()
         for _, _, spk in diar:
@@ -88,7 +70,6 @@ def align_speakers(
                 seen.add(spk)
                 speakers_in_order.append(spk)
 
-        # 建立映射
         seg_map = {}
         for spk in speakers_in_order:
             if spk in current_map:
@@ -104,8 +85,43 @@ def align_speakers(
     return mappings
 
 
+def build_result(
+    results: dict[int, tuple[str, str | None]],
+    seg_paths: list[tuple[int, float, float, str]],
+    segment_diarizations: list[list[tuple[float, float, str]] | None] | None = None,
+    speaker_mappings: list[dict[str, str]] | None = None,
+) -> tuple[str, str]:
+    """根据已完成的段构建完整的 result_text 和 result_srt。"""
+    sorted_indices = sorted(results.keys())
+    merged_texts = []
+    srt_segments = []
+
+    for i, seg_idx in enumerate(sorted_indices):
+        text, _ = results[seg_idx]
+        _, seg_start, seg_end, _ = seg_paths[seg_idx]
+        merged_texts.append(text)
+
+        # 分配说话人
+        speaker = None
+        if segment_diarizations and speaker_mappings:
+            diar = segment_diarizations[seg_idx]
+            spk_map = speaker_mappings[seg_idx]
+            if diar and spk_map:
+                raw_speaker = assign_speaker_to_segment(0, seg_end - seg_start, diar)
+                speaker = spk_map.get(raw_speaker, "A")
+
+        srt_segments.append((i, seg_start, seg_end, text, speaker))
+
+    full_text = clean_text("\n\n".join(merged_texts))
+    srt_text = build_srt(
+        [(i, s, e, t) for i, s, e, t, _ in srt_segments],
+        speakers=[spk for _, _, _, _, spk in srt_segments],
+    )
+    return full_text, srt_text
+
+
 def run_task_streaming(task: dict) -> None:
-    """流式处理一个任务：分段转写，实时更新结果。"""
+    """流式处理一个任务：先转写（实时更新），后做说话人分离。"""
     task_id = task["id"]
     audio_file_id = task["audio_file_id"]
     language = task.get("language")
@@ -155,36 +171,13 @@ def run_task_streaming(task: dict) -> None:
             sf.write(seg_file, seg, 16000)
             seg_paths.append((idx, start / 16000.0, end / 16000.0, seg_file))
 
-        # 5. 对每段做说话人分离（串行，因为 pyannote.audio 不支持多线程）
-        logger.info("task=%s 开始逐段说话人分离...", task_id)
-        segment_diarizations: list[list[tuple[float, float, str]] | None] = []
-        for idx, start, end, seg_file in seg_paths:
-            if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
-                diar = diarize_audio(
-                    seg_file,
-                    settings.HUGGINGFACE_TOKEN,
-                    max_duration_s=STREAM_SEGMENT_S + 10,
-                    timeout_s=120,
-                )
-                segment_diarizations.append(diar)
-                if diar:
-                    logger.info("task=%s 段 %d/%d 说话人分离完成，%d 个说话人",
-                                task_id, idx + 1, total, len(set(d[2] for d in diar)))
-                else:
-                    logger.info("task=%s 段 %d/%d 说话人分离跳过/失败", task_id, idx + 1, total)
-            else:
-                segment_diarizations.append(None)
-
-        # 6. 对齐说话人
-        speaker_mappings = align_speakers(segment_diarizations)
-        logger.info("task=%s 说话人对齐完成", task_id)
-
-        # 7. 并发转写每段，每完成一段就更新结果
-        results: dict[int, tuple[str, str | None]] = {}  # idx -> (text, language)
+        # 5. 先并发转写所有段，每完成一段就更新结果（不等待说话人分离）
+        logger.info("task=%s 开始并发转写（不等待说话人分离）...", task_id)
+        results: dict[int, tuple[str, str | None]] = {}
         lang_list: list[str | None] = []
         done = 0
 
-        with ThreadPoolExecutor(max_workers=min(settings.WORKER_CONCURRENCY, 3)) as pool:
+        with ThreadPoolExecutor(max_workers=min(settings.WORKER_CONCURRENCY, 4)) as pool:
             futures = {
                 pool.submit(transcribe_segment, seg_file, language): (idx, start, end)
                 for idx, start, end, seg_file in seg_paths
@@ -199,37 +192,42 @@ def run_task_streaming(task: dict) -> None:
                 # 存入 segments 表
                 db.upsert_segment(task_id, idx, start, end, text, "done")
 
-                # 重新生成完整结果（已完成的段按顺序合并）
-                sorted_indices = sorted(results.keys())
-                merged_texts = []
-                srt_segments = []
-                for i, seg_idx in enumerate(sorted_indices):
-                    text, _ = results[seg_idx]
-                    _, seg_start, seg_end, _ = seg_paths[seg_idx]
-                    merged_texts.append(text)
-
-                    # 分配说话人
-                    diar = segment_diarizations[seg_idx]
-                    spk_map = speaker_mappings[seg_idx]
-                    if diar and spk_map:
-                        raw_speaker = assign_speaker_to_segment(0, seg_end - seg_start, diar)
-                        speaker = spk_map.get(raw_speaker, "A")
-                    else:
-                        speaker = None
-                    srt_segments.append((i, seg_start, seg_end, text, speaker))
-
-                full_text = clean_text("\n\n".join(merged_texts))
-                srt_text = build_srt(
-                    [(i, s, e, t) for i, s, e, t, _ in srt_segments],
-                    speakers=[spk for _, _, _, _, spk in srt_segments],
-                )
-
-                # 实时更新数据库
+                # 实时更新结果（说话人标签先用 None，前端用启发式算法）
+                full_text, srt_text = build_result(results, seg_paths)
                 db.update_partial_result(task_id, full_text, srt_text, total, done)
-                logger.info("task=%s 段 %d/%d 完成，已实时更新结果", task_id, done, total)
+                logger.info("task=%s 转写段 %d/%d 完成，已实时更新", task_id, done, total)
 
-        # 8. 全部完成，标记任务完成
+        logger.info("task=%s 所有段转写完成，开始说话人分离...", task_id)
+
+        # 6. 转写完成后，再做说话人分离（串行，因为 pyannote.audio 不支持多线程）
+        segment_diarizations: list[list[tuple[float, float, str]] | None] = []
+        if settings.ENABLE_SPEAKER_DIARIZATION and settings.HUGGINGFACE_TOKEN:
+            for idx, start, end, seg_file in seg_paths:
+                diar = diarize_audio(
+                    seg_file,
+                    settings.HUGGINGFACE_TOKEN,
+                    max_duration_s=STREAM_SEGMENT_S + 10,
+                    timeout_s=120,
+                )
+                segment_diarizations.append(diar)
+                if diar:
+                    logger.info("task=%s 说话人分离段 %d/%d 完成，%d 个说话人",
+                                task_id, idx + 1, total, len(set(d[2] for d in diar)))
+                else:
+                    logger.info("task=%s 说话人分离段 %d/%d 跳过/失败", task_id, idx + 1, total)
+
+                # 每完成一段说话人分离就更新结果
+                speaker_mappings = align_speakers(segment_diarizations + [None] * (total - len(segment_diarizations)))
+                full_text, srt_text = build_result(results, seg_paths, segment_diarizations, speaker_mappings)
+                db.update_partial_result(task_id, full_text, srt_text, total, total)
+        else:
+            segment_diarizations = [None] * total
+
+        # 7. 全部完成，标记任务完成
+        speaker_mappings = align_speakers(segment_diarizations)
+        full_text, srt_text = build_result(results, seg_paths, segment_diarizations, speaker_mappings)
         detected_lang = aggregate_language(lang_list) or language
+
         db.mark_task_completed(task_id, full_text, srt_text, total)
 
         if audio_file["user_id"]:
