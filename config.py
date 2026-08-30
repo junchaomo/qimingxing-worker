@@ -32,18 +32,20 @@ class Settings:
     SUPABASE_SERVICE_ROLE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     STORAGE_BUCKET: str = os.environ.get("STORAGE_BUCKET", "audio")
 
-    # --- DashScope / Qwen-ASR ---
+    # --- DashScope / Qwen-ASR (Filetrans 异步模式，支持说话人分离) ---
     DASHSCOPE_API_KEY: str = os.environ.get("DASHSCOPE_API_KEY", "")
-    # 默认使用 qwen-audio-3.0-asr-flash（qwen3-asr-flash 已标记即将部分下线）
-    DASHSCOPE_MODEL: str = os.environ.get("DASHSCOPE_MODEL", "qwen-audio-3.0-asr-flash")
-    # sk-ws- 工作空间专属 Key 必须使用业务空间专属网关域名；生产环境用环境变量覆盖
+    # 使用 Filetrans 模型，支持说话人分离
+    DASHSCOPE_MODEL: str = os.environ.get("DASHSCOPE_MODEL", "qwen-audio-3.0-asr-flash-filetrans")
+    # Filetrans 异步任务接口（旧域名仍可用，无需 WorkspaceId）
     DASHSCOPE_BASE_URL: str = os.environ.get(
         "DASHSCOPE_BASE_URL",
-        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+        "https://dashscope.aliyuncs.com/api/v1",
     )
     ASR_AUDIO_FORMAT: str = os.environ.get("ASR_AUDIO_FORMAT", "wav")   # 与 audio.py 转换结果一致
     ASR_SAMPLE_RATE: int = _int("ASR_SAMPLE_RATE", 16000)              # 与 audio.py 转换结果一致
     ENABLE_ITN: bool = os.environ.get("ENABLE_ITN", "true").lower() in ("1", "true", "yes")
+    # 是否启用说话人分离
+    ENABLE_SPEAKER_DIARIZATION: bool = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() in ("1", "true", "yes")
 
     # --- 并发与限流 ---
     WORKER_CONCURRENCY: int = _int("WORKER_CONCURRENCY", 4)   # 每任务内并发段数

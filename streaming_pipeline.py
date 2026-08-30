@@ -1,290 +1,238 @@
-"""流式转写管线：长音频分段处理，每完成一段就实时更新结果。
+"""转写管线：使用 Qwen-Audio-3.0-ASR-Flash-Filetrans 异步模型。
 
 流程：
-1. VAD 按静音处切分，每段约 30-60 秒
-2. 并发转写所有段，每完成一段就立即更新结果（用户快速看到内容）
-3. 所有段完成后，合并生成最终结果
+1. 下载原始音频
+2. 转码为单声道 WAV（说话人分离要求单声道）
+3. 裁剪（如果指定）
+4. 上传到 Supabase 并生成签名 URL
+5. 调用 Filetrans 异步转写（支持说话人分离）
+6. 解析结果，生成对话格式（带 speaker 标签）
+7. 更新数据库
 
-注意：已取消 pyannote 说话人分离，只保留 Qwen3-ASR 纯转写。
+注意：Filetrans 是整段转写，不需要 VAD 分段。
 """
 import logging
 import os
 import shutil
-import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import numpy as np
 import soundfile as sf
 
 import db
-from audio import load_wav, transcode_to_wav, trim_wav
-from asr_client import transcribe_segment
+from asr_client import transcribe_file
+from audio import load_wav, probe_duration, transcode_to_wav, trim_wav
 from config import settings
-from postprocess import aggregate_language, clean_text
-from srt import build_srt
-from storage import download
-from vad import segment_audio
+from postprocess import aggregate_language
+from storage import create_signed_url, download, upload_and_get_url
 
 logger = logging.getLogger("worker.streaming")
 
 
-def map_speaker_labels(diarization: list[tuple[float, float, str]]) -> dict[str, str]:
-    """把 pyannote 的 SPEAKER_00 等标签映射为 A、B、C..."""
-    speakers = []
-    seen = set()
-    for _, _, spk in diarization:
-        if spk not in seen:
-            seen.add(spk)
-            speakers.append(spk)
-    return {spk: chr(ord("A") + i) for i, spk in enumerate(speakers)}
+def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
+    """根据句子级结果生成对话格式的 Markdown 和 SRT。
 
-
-def assign_speaker_to_time(
-    t: float, diarization: list[tuple[float, float, str]]
-) -> str | None:
-    """根据时间点从全局说话人时间轴中分配说话人。"""
-    for start, end, speaker in diarization:
-        if start <= t < end:
-            return speaker
-    return None
-
-
-def build_dialogue_from_words(
-    all_words: list[tuple[float, float, str]],
-    diarization: list[tuple[float, float, str]] | None,
-    speaker_map: dict[str, str] | None,
-) -> list[dict]:
-    """根据词级时间戳和说话人时间轴，生成对话分段。
-
-    返回：[{"start": float, "end": float, "speaker": str, "text": str}, ...]
+    连续相同说话人的句子合并为一段。
     """
-    if not all_words:
-        return []
-
-    # 按时间排序
-    all_words.sort(key=lambda x: x[0])
-
-    segments = []
-    current_speaker = None
-    current_text = []
-    current_start = None
-    current_end = None
-
-    for start, end, word in all_words:
-        # 分配说话人
-        raw_speaker = None
-        if diarization and speaker_map:
-            raw_speaker = assign_speaker_to_time(start, diarization)
-        speaker = speaker_map.get(raw_speaker, "A") if raw_speaker and speaker_map else "A"
-
-        # 如果说话人变化，开始新段
-        if speaker != current_speaker and current_text:
-            segments.append({
-                "start": current_start,
-                "end": current_end,
-                "speaker": current_speaker,
-                "text": "".join(current_text).strip(),
-            })
-            current_text = []
-            current_start = None
-
-        current_speaker = speaker
-        if current_start is None:
-            current_start = start
-        current_end = end
-        current_text.append(word)
-
-    # 最后一段
-    if current_text:
-        segments.append({
-            "start": current_start,
-            "end": current_end,
-            "speaker": current_speaker,
-            "text": "".join(current_text).strip(),
-        })
-
-    return segments
-
-
-def format_dialogue_text(segments: list[dict]) -> str:
-    """把对话分段格式化为 markdown 文本。"""
-    lines = []
-    for seg in segments:
-        speaker = seg["speaker"] or "A"
-        text = seg["text"]
-        if text:
-            lines.append(f"**{speaker}**: {text}")
-    return "\n\n".join(lines)
-
-
-def build_result_simple(
-    results: dict[int, tuple[str, str | None, list]],
-    seg_paths: list[tuple[int, float, float, str]],
-) -> tuple[str, str]:
-    """转写过程中使用的简单结果构建（无说话人标签）。"""
-    sorted_indices = sorted(results.keys())
-    merged_texts = []
-    srt_segments = []
-
-    for i, seg_idx in enumerate(sorted_indices):
-        text, _, _ = results[seg_idx]
-        _, seg_start, seg_end, _ = seg_paths[seg_idx]
-        merged_texts.append(text)
-        srt_segments.append((i, seg_start, seg_end, text, None))
-
-    full_text = clean_text("\n\n".join(merged_texts))
-    srt_text = build_srt(
-        [(i, s, e, t) for i, s, e, t, _ in srt_segments],
-        speakers=[None] * len(srt_segments),
-    )
-    return full_text, srt_text
-
-
-def build_result_with_speakers(
-    all_words: list[tuple[float, float, str]],
-    diarization: list[tuple[float, float, str]] | None,
-) -> tuple[str, str]:
-    """说话人分离完成后，生成带说话人标签的结果。"""
-    logger.info("生成结果：词数=%d, 说话人分离片段=%d", len(all_words), len(diarization) if diarization else 0)
-
-    if not all_words:
-        logger.warning("词级时间戳为空，无法生成对话格式，使用纯文本")
+    if not sentences:
         return "", ""
 
-    if not diarization:
-        # 没有说话人分离结果，用简单格式
-        logger.warning("没有说话人分离结果，使用无标签格式")
-        text = clean_text("".join(w[2] for w in sorted(all_words, key=lambda x: x[0])))
-        return text, ""
+    # 按说话人连续分段
+    dialogue_segments = []
+    current_speaker = None
+    current_text = ""
+    current_start = 0
+    current_end = 0
 
-    speaker_map = map_speaker_labels(diarization)
-    logger.info("说话人映射: %s", speaker_map)
-    segments = build_dialogue_from_words(all_words, diarization, speaker_map)
-    logger.info("生成对话分段数=%d", len(segments))
+    for sent in sentences:
+        speaker = sent.get("speaker_id")
+        text = sent.get("text", "").strip()
+        if not text:
+            continue
 
-    # 生成 markdown 文本
-    full_text = format_dialogue_text(segments)
+        if speaker != current_speaker:
+            if current_speaker is not None and current_text:
+                dialogue_segments.append({
+                    "speaker": current_speaker,
+                    "text": current_text.strip(),
+                    "start": current_start,
+                    "end": current_end,
+                })
+            current_speaker = speaker
+            current_text = text
+            current_start = sent["begin_time"]
+            current_end = sent["end_time"]
+        else:
+            current_text += text
+            current_end = sent["end_time"]
+
+    if current_speaker is not None and current_text:
+        dialogue_segments.append({
+            "speaker": current_speaker,
+            "text": current_text.strip(),
+            "start": current_start,
+            "end": current_end,
+        })
+
+    # 生成 Markdown
+    md_lines = []
+    for seg in dialogue_segments:
+        speaker_label = f"Speaker {chr(65 + seg['speaker'])}" if seg["speaker"] is not None else "Speaker"
+        time_str = f"{int(seg['start']//60):02d}:{int(seg['start']%60):02d}"
+        md_lines.append(f"**{speaker_label}** ({time_str})\n\n{seg['text']}\n")
+    full_text = "\n".join(md_lines)
 
     # 生成 SRT
-    srt_entries = []
-    for i, seg in enumerate(segments):
-        srt_entries.append((i, seg["start"], seg["end"], seg["text"], seg["speaker"]))
-    srt_text = build_srt(
-        [(i, s, e, t) for i, s, e, t, _ in srt_entries],
-        speakers=[spk for _, _, _, _, spk in srt_entries],
-    )
+    srt_lines = []
+    for i, seg in enumerate(dialogue_segments, 1):
+        start_h = int(seg["start"] // 3600)
+        start_m = int((seg["start"] % 3600) // 60)
+        start_s = int(seg["start"] % 60)
+        start_ms = int((seg["start"] % 1) * 1000)
+        end_h = int(seg["end"] // 3600)
+        end_m = int((seg["end"] % 3600) // 60)
+        end_s = int(seg["end"] % 60)
+        end_ms = int((seg["end"] % 1) * 1000)
+        speaker_label = f"Speaker {chr(65 + seg['speaker'])}" if seg["speaker"] is not None else "Speaker"
+        srt_lines.append(f"{i}")
+        srt_lines.append(f"{start_h:02d}:{start_m:02d}:{start_s:02d},{start_ms:03d} --> {end_h:02d}:{end_m:02d}:{end_s:02d},{end_ms:03d}")
+        srt_lines.append(f"{speaker_label}: {seg['text']}")
+        srt_lines.append("")
+    srt_text = "\n".join(srt_lines)
 
     return full_text, srt_text
 
 
-def run_task_streaming(task: dict) -> None:
-    """流式处理一个任务：先转写（实时更新），后做整段说话人分离。"""
-    task_id = task["id"]
-    audio_file_id = task["audio_file_id"]
-    language = task.get("language")
-    trim_start = task.get("trim_start")
-    trim_end = task.get("trim_end")
-
-    workdir = os.path.join(settings.TMP_DIR, f"{task_id}_{uuid.uuid4().hex[:8]}")
+def run_task_streaming(task_id: str) -> None:
+    """执行转写任务（Filetrans 异步模式）。"""
+    workdir = os.path.join(settings.TMP_DIR, f"task_{task_id}_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)
+    temp_storage_path = None
+
     try:
-        # 1. 下载 + 转码
+        # 1. 获取任务信息
+        task = db.get_task(task_id)
+        if not task:
+            raise RuntimeError(f"任务不存在: {task_id}")
+
+        audio_file_id = task["audio_file_id"]
         audio_file = db.get_audio_file(audio_file_id)
         if not audio_file:
-            raise RuntimeError(f"audio_file {audio_file_id} 不存在")
-        raw_path = download(settings.STORAGE_BUCKET, audio_file["storage_path"], workdir)
+            raise RuntimeError(f"音频文件不存在: {audio_file_id}")
 
-        wav_path = os.path.join(workdir, "full.wav")
+        language = task.get("language")
+        trim_start = task.get("trim_start")
+        trim_end = task.get("trim_end")
+
+        logger.info("task=%s 开始处理，音频文件=%s", task_id, audio_file_id)
+
+        # 2. 下载原始音频
+        storage_path = audio_file["storage_path"]
+        raw_path = download(settings.STORAGE_BUCKET, storage_path, workdir)
+        logger.info("task=%s 已下载原始音频: %s", task_id, raw_path)
+
+        # 3. 转码为单声道 16kHz WAV（说话人分离要求单声道）
+        wav_path = os.path.join(workdir, "input.wav")
         transcode_to_wav(raw_path, wav_path)
+        logger.info("task=%s 已转码为单声道 WAV", task_id)
 
-        # 2. 裁剪（如果指定）
-        trim_offset = 0.0
+        # 4. 裁剪（如果指定）
         if trim_start is not None or trim_end is not None:
             trimmed_path = os.path.join(workdir, "trimmed.wav")
             start = float(trim_start) if trim_start is not None else 0.0
             if trim_end is not None:
                 end = float(trim_end)
             else:
-                from audio import probe_duration
                 end = probe_duration(wav_path)
             if end > start:
                 trim_wav(wav_path, trimmed_path, start, end)
                 wav_path = trimmed_path
-                trim_offset = start
                 logger.info("task=%s 已裁剪 %.1fs - %.1fs", task_id, start, end)
 
-        # 3. 加载音频 + 分段
-        wav = load_wav(wav_path)
-        duration_s = int(round(len(wav) / 16000.0))
+        # 5. 获取音频时长
+        duration_s = int(round(probe_duration(wav_path)))
         db.update_audio_duration(audio_file_id, duration_s)
+        logger.info("task=%s 音频时长: %ds", task_id, duration_s)
 
-        segments = segment_audio(wav)
-        total = len(segments)
-        logger.info("task=%s VAD分段共 %d 段（按静音处切分）", task_id, total)
-        db.update_progress(task_id, total, 0)
+        # 6. 上传到 Supabase 并生成签名 URL
+        logger.info("task=%s 上传音频到 Storage 以生成可访问 URL...", task_id)
+        temp_storage_path, file_url = upload_and_get_url(
+            settings.STORAGE_BUCKET,
+            wav_path,
+            prefix="asr_temp",
+            content_type="audio/wav",
+        )
+        logger.info("task=%s 已生成签名 URL", task_id)
 
-        # 4. 落盘每段为独立 wav
-        seg_paths = []
-        for idx, (start, end, seg) in enumerate(segments):
-            seg_file = os.path.join(workdir, f"seg_{idx:04d}.wav")
-            sf.write(seg_file, seg, 16000)
-            # 时间加上裁剪偏移量，得到全局时间戳
-            global_start = start / 16000.0 + trim_offset
-            global_end = end / 16000.0 + trim_offset
-            seg_paths.append((idx, global_start, global_end, seg_file))
+        # 7. 更新任务状态为处理中
+        db.update_task_stage(task_id, "processing", 0.1)
 
-        # 5. 先并发转写所有段，每完成一段就更新结果（不等待说话人分离）
-        logger.info("task=%s 开始并发转写（不等待说话人分离）...", task_id)
-        results: dict[int, tuple[str, str | None, list]] = {}
-        lang_list: list[str | None] = []
-        all_words: list[tuple[float, float, str]] = []
-        done = 0
+        # 8. 调用 Filetrans 转写
+        logger.info("task=%s 开始调用 Filetrans 转写（说话人分离=%s）...",
+                    task_id, settings.ENABLE_SPEAKER_DIARIZATION)
+        start_time = time.time()
 
-        with ThreadPoolExecutor(max_workers=min(settings.WORKER_CONCURRENCY, 4)) as pool:
-            futures = {
-                pool.submit(transcribe_segment, seg_file, language): (idx, global_start)
-                for idx, global_start, _, seg_file in seg_paths
-            }
-            for fut in as_completed(futures):
-                idx, seg_start = futures[fut]
-                text, seg_lang, words = fut.result()
-                results[idx] = (text, seg_lang, words)
-                lang_list.append(seg_lang)
-                done += 1
+        full_text, detected_lang, sentences = transcribe_file(
+            file_url,
+            language=language,
+            poll_interval=5,
+            timeout=max(duration_s * 3, 600),
+        )
 
-                # 把词级时间戳加上段偏移量，存入全局列表
-                for w_start, w_end, w_text in words:
-                    all_words.append((w_start + seg_start, w_end + seg_start, w_text))
+        elapsed = time.time() - start_time
+        logger.info("task=%s 转写完成，耗时 %.0fs，句子数=%d", task_id, elapsed, len(sentences))
 
-                # 存入 segments 表
-                _, _, seg_end, _ = seg_paths[idx]
-                db.upsert_segment(task_id, idx, seg_start, seg_end, text, "done")
+        # 9. 生成对话格式结果
+        if sentences and settings.ENABLE_SPEAKER_DIARIZATION:
+            result_text, result_srt = build_dialogue_result(sentences)
+        else:
+            # 无说话人分离，用纯文本
+            result_text = full_text
+            result_srt = ""
+            if sentences:
+                # 简单 SRT
+                srt_lines = []
+                for i, sent in enumerate(sentences, 1):
+                    srt_lines.append(f"{i}")
+                    srt_lines.append(f"{int(sent['begin_time']//3600):02d}:{int((sent['begin_time']%3600)//60):02d}:{int(sent['begin_time']%60):02d},000 --> {int(sent['end_time']//3600):02d}:{int((sent['end_time']%3600)//60):02d}:{int(sent['end_time']%60):02d},000")
+                    srt_lines.append(sent["text"])
+                    srt_lines.append("")
+                result_srt = "\n".join(srt_lines)
 
-                # 实时更新结果（说话人标签先用 None）
-                full_text, srt_text = build_result_simple(results, seg_paths)
-                db.update_partial_result(task_id, full_text, srt_text, total, done)
-                logger.info("task=%s 转写段 %d/%d 完成，已实时更新", task_id, done, total)
+        # 10. 标记任务完成
+        db.mark_task_completed(task_id, result_text, result_srt, 1)
+        logger.info("task=%s 任务已标记为完成", task_id)
 
-        logger.info("task=%s 所有段转写完成，共收集 %d 个词级时间戳", task_id, len(all_words))
-
-        # 6. 生成最终结果（纯文本，无说话人分离）
-        logger.info("task=%s 开始生成最终结果，all_words=%d", task_id, len(all_words))
-        full_text, srt_text = build_result_simple(results, seg_paths)
-        detected_lang = aggregate_language(lang_list) or language
-        logger.info("task=%s 最终结果生成完成，文本长度=%d", task_id, len(full_text))
-
-        db.mark_task_completed(task_id, full_text, srt_text, total)
-        logger.info("task=%s 任务已标记为完成，progress=1.0", task_id)
-
+        # 11. 扣除额度
         if audio_file["user_id"]:
             db.insert_usage_record(audio_file["user_id"], task_id, duration_s)
 
         logger.info(
-            "task=%s 转写完成，语言=%s，时长=%ss，共 %d 段",
-            task_id, detected_lang, duration_s, total,
+            "task=%s 转写完成，语言=%s，时长=%ds，说话人=%s",
+            task_id,
+            detected_lang or language,
+            duration_s,
+            "已分离" if settings.ENABLE_SPEAKER_DIARIZATION and sentences else "未分离",
         )
 
+    except Exception as e:
+        logger.error("task=%s 转写失败: %s", task_id, e, exc_info=True)
+        db.mark_task_failed(task_id, f"{type(e).__name__}: {e}")
+        raise
     finally:
+        # 清理临时文件
         shutil.rmtree(workdir, ignore_errors=True)
+        # 清理临时上传的音频
+        if temp_storage_path:
+            try:
+                from storage import settings as st
+                import requests
+                url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.STORAGE_BUCKET}/{temp_storage_path}"
+                headers = {
+                    "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
+                }
+                requests.delete(url, headers=headers, timeout=30)
+                logger.info("已清理临时音频: %s", temp_storage_path)
+            except Exception as e:
+                logger.warning("清理临时音频失败: %s", e)

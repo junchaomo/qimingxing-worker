@@ -1,17 +1,14 @@
-"""DashScope / Qwen-ASR 调用层：同步多模态接口 + 全局限流 + 指数退避重试。
+"""DashScope / Qwen-Audio-3.0-ASR-Flash-Filetrans 异步调用层。
 
-输入为 16kHz 单声道 WAV 段（本地路径），单段 ≤ MAX_SEGMENT_S。
-当前适配模型: qwen-audio-3.0-asr-flash（qwen3-asr-flash 已标记即将部分下线）。
+Filetrans 模型支持说话人分离（speaker diarization），采用异步任务模式：
+1. 提交任务（POST /services/audio/asr/transcription）
+2. 轮询任务状态（GET /tasks/{task_id}）
+3. 下载结果 JSON（transcription_url）
+4. 解析文本、句子级时间戳、说话人标签
 
-请求要点：
-  - sk-ws- 工作空间专属 Key 必须配合业务空间专属网关域名（DASHSCOPE_BASE_URL）；
-  - 音频以 base64 data URI 形式放在 input_audio.data 中；
-  - parameters 需带 format / sample_rate，与 audio.py 转换输出一致；
-  - 响应文本位于 output.text（旧格式的 output.choices 不再返回，保留解析兜底）。
+输入为音频文件的可访问 URL（HTTP/HTTPS）。
 """
-import base64
 import logging
-import threading
 import time
 
 import requests
@@ -20,130 +17,157 @@ from config import settings
 
 logger = logging.getLogger("worker.asr_client")
 
-# 全局并发护栏：限制同时进行的 API 请求总数，防触发 DashScope 限流/封禁
-_global_semaphore = threading.BoundedSemaphore(settings.GLOBAL_API_SEMAPHORE)
 
+def submit_task(file_url: str, language: str | None = None) -> str:
+    """提交异步转写任务，返回 task_id。"""
+    url = f"{settings.DASHSCOPE_BASE_URL}/services/audio/asr/transcription"
 
-def _wav_to_data_uri(wav_path: str) -> str:
-    with open(wav_path, "rb") as f:
-        raw = f.read()
-    return f"data:audio/{settings.ASR_AUDIO_FORMAT};base64," + base64.b64encode(raw).decode()
+    parameters: dict = {}
+    if settings.ENABLE_SPEAKER_DIARIZATION:
+        parameters["diarization_enabled"] = True
+    if language:
+        parameters["language_hints"] = [language]
 
-
-def _call_once(wav_path: str, language: str | None) -> dict:
     payload = {
         "model": settings.DASHSCOPE_MODEL,
         "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": _wav_to_data_uri(wav_path)},
-                        }
-                    ],
-                }
-            ]
+            "file_urls": [file_url],
         },
-        "parameters": {
-            "format": settings.ASR_AUDIO_FORMAT,
-            "sample_rate": str(settings.ASR_SAMPLE_RATE),
-        },
+        "parameters": parameters,
     }
-    # qwen-audio-3.0-asr-flash 支持 30 语种自动识别；如传入 language 则作为可选约束下发
-    if language:
-        payload["parameters"]["asr_options"] = {"language": language}
 
     headers = {
         "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
         "Content-Type": "application/json",
-        "X-DashScope-SSE": "disable",
+        "X-DashScope-Async": "enable",
     }
-    resp = requests.post(
-        settings.DASHSCOPE_BASE_URL,
-        json=payload,
-        headers=headers,
-        timeout=settings.API_TIMEOUT_S,
-    )
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
     if resp.status_code != 200:
-        raise RuntimeError(f"DashScope HTTP {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(f"提交任务失败 HTTP {resp.status_code}: {resp.text[:500]}")
+
+    data = resp.json()
+    task_id = data.get("output", {}).get("task_id")
+    if not task_id:
+        raise RuntimeError(f"提交任务失败，未返回 task_id: {data}")
+
+    logger.info("已提交转写任务: task_id=%s", task_id)
+    return task_id
+
+
+def query_task(task_id: str) -> dict:
+    """查询任务状态，返回任务详情。"""
+    url = f"{settings.DASHSCOPE_BASE_URL}/tasks/{task_id}"
+
+    headers = {
+        "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
+    }
+
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"查询任务失败 HTTP {resp.status_code}: {resp.text[:500]}")
+
     return resp.json()
 
 
-def _parse_words(sentence: dict | None) -> list[tuple[float, float, str]]:
-    """从 sentence 中解析词级时间戳。"""
-    if not sentence or not isinstance(sentence, dict):
-        return []
-    word_list = sentence.get("words") or []
-    words: list[tuple[float, float, str]] = []
-    for w in word_list:
-        if not isinstance(w, dict):
-            continue
-        start = w.get("begin_time") or w.get("start") or 0
-        end = w.get("end_time") or w.get("end") or start
-        text = w.get("text") or w.get("word") or ""
-        if not text:
-            continue
-        # 时间单位可能是毫秒或秒，根据数值判断
-        if start > 1000:
-            start = start / 1000.0
-            end = end / 1000.0
-        words.append((float(start), float(end), str(text)))
-    return words
+def download_result(transcription_url: str) -> dict:
+    """下载转写结果 JSON。"""
+    resp = requests.get(transcription_url, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"下载结果失败 HTTP {resp.status_code}: {resp.text[:500]}")
+    return resp.json()
 
 
-def _parse(data: dict) -> tuple[str, str | None, list[tuple[float, float, str]]]:
-    """从响应中解析 (text, language, words)。
+def parse_result(result_data: dict) -> tuple[str, str | None, list[dict]]:
+    """解析转写结果，返回 (完整文本, 语言, 句子列表)。
 
-    words 格式：[(start_s, end_s, word), ...]，时间相对于该段开始。
+    每个句子包含: begin_time(s), end_time(s), text, speaker_id, words[]
     """
-    # 解析词级时间戳
-    sentence = data.get("sentence") or (data.get("output") or {}).get("sentence")
-    words = _parse_words(sentence)
-    logger.info("ASR响应解析：文本长度=%d, 词数=%d, sentence存在=%s",
-                len(data.get("text", "")), len(words), sentence is not None)
-    if words:
-        logger.info("前3个词: %s", words[:3])
+    transcripts = result_data.get("transcripts", [])
+    if not transcripts:
+        return "", None, []
 
-    # 新格式：顶层 / output.text
-    text = data.get("text") or (data.get("output") or {}).get("text") or ""
-    if text:
-        return text, None, words
+    transcript = transcripts[0]
+    full_text = transcript.get("text", "")
+    language = transcript.get("language") or None
 
-    # 旧格式兜底：output.choices[0].message.content[0].text
-    try:
-        choices = data["output"]["choices"]
-        message = choices[0]["message"]
-        text = message["content"][0].get("text", "")
-        annotations = message.get("annotations") or []
-        language = None
-        for ann in annotations:
-            if ann.get("type") == "audio_info":
-                language = ann.get("language")
-                break
-        return text, language, words
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError(f"DashScope 响应解析失败: {str(data)[:800]}") from None
+    sentences = []
+    for sent in transcript.get("sentences", []):
+        # 时间戳是毫秒，转成秒
+        begin = (sent.get("begin_time") or 0) / 1000.0
+        end = (sent.get("end_time") or 0) / 1000.0
+        text = sent.get("text", "")
+        speaker_id = sent.get("speaker_id")
+        words = sent.get("words", [])
+
+        sentences.append({
+            "begin_time": begin,
+            "end_time": end,
+            "text": text,
+            "speaker_id": speaker_id,
+            "words": words,
+        })
+
+    logger.info(
+        "解析结果: 文本长度=%d, 句子数=%d, 说话人数=%d",
+        len(full_text),
+        len(sentences),
+        len(set(s["speaker_id"] for s in sentences if s["speaker_id"] is not None)),
+    )
+    return full_text, language, sentences
 
 
-def transcribe_segment(
-    wav_path: str, language: str | None = None
-) -> tuple[str, str | None, list[tuple[float, float, str]]]:
-    """转写单个段，带全局限流与指数退避重试。返回 (text, language, words)。"""
-    if not settings.DASHSCOPE_API_KEY:
-        raise RuntimeError("DASHSCOPE_API_KEY 未配置")
+def transcribe_file(
+    file_url: str,
+    language: str | None = None,
+    poll_interval: int = 3,
+    timeout: int = 1800,
+) -> tuple[str, str | None, list[dict]]:
+    """完整的转写流程：提交→轮询→下载→解析。
 
-    with _global_semaphore:
-        last_exc: Exception | None = None
-        for attempt in range(settings.SEGMENT_MAX_RETRIES):
-            try:
-                data = _call_once(wav_path, language)
-                return _parse(data)
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                wait = 2 ** attempt  # 1s -> 2s -> 4s
-                logger.warning("segment 调用失败(第%d次): %s，%.0fs 后重试",
-                               attempt + 1, exc, wait)
-                time.sleep(wait)
-        raise RuntimeError(f"段转写重试耗尽: {last_exc}")
+    返回 (完整文本, 语言, 句子列表)
+    """
+    start_time = time.time()
+
+    # 1. 提交任务
+    task_id = submit_task(file_url, language)
+
+    # 2. 轮询任务状态
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            raise RuntimeError(f"转写超时（{timeout}秒）")
+
+        task_data = query_task(task_id)
+        output = task_data.get("output", {})
+        task_status = output.get("task_status", "")
+
+        logger.info("任务状态: %s, 已用 %.0fs", task_status, elapsed)
+
+        if task_status == "SUCCEEDED":
+            # 3. 下载结果
+            results = output.get("results", [])
+            if not results:
+                raise RuntimeError("任务成功但无结果")
+
+            transcription_url = results[0].get("transcription_url")
+            if not transcription_url:
+                raise RuntimeError(f"结果中无 transcription_url: {results[0]}")
+
+            result_data = download_result(transcription_url)
+
+            # 4. 解析结果
+            return parse_result(result_data)
+
+        elif task_status == "FAILED":
+            results = output.get("results", [])
+            error_msg = "未知错误"
+            if results and results[0].get("message"):
+                error_msg = results[0]["message"]
+            raise RuntimeError(f"转写任务失败: {error_msg}")
+
+        elif task_status in ("PENDING", "RUNNING", "QUEUED"):
+            time.sleep(poll_interval)
+        else:
+            logger.warning("未知任务状态: %s", task_status)
+            time.sleep(poll_interval)

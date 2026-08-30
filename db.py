@@ -175,6 +175,14 @@ def update_task_stage(task_id: str, stage: str, progress: float | None = None) -
                 )
 
 
+def get_task(task_id: str) -> dict | None:
+    """获取任务详情。"""
+    with get_conn() as conn:
+        return conn.execute(
+            "select * from transcription_tasks where id=%s", (task_id,)
+        ).fetchone()
+
+
 def get_audio_file(audio_file_id: str) -> dict | None:
     with get_conn() as conn:
         return conn.execute(
