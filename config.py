@@ -44,8 +44,6 @@ class Settings:
     ASR_AUDIO_FORMAT: str = os.environ.get("ASR_AUDIO_FORMAT", "wav")   # 与 audio.py 转换结果一致
     ASR_SAMPLE_RATE: int = _int("ASR_SAMPLE_RATE", 16000)              # 与 audio.py 转换结果一致
     ENABLE_ITN: bool = os.environ.get("ENABLE_ITN", "true").lower() in ("1", "true", "yes")
-    # 是否启用说话人分离
-    ENABLE_SPEAKER_DIARIZATION: bool = os.environ.get("ENABLE_SPEAKER_DIARIZATION", "true").lower() in ("1", "true", "yes")
 
     # --- 并发与限流 ---
     WORKER_CONCURRENCY: int = _int("WORKER_CONCURRENCY", 4)   # 每任务内并发段数
