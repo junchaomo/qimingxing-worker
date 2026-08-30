@@ -135,27 +135,24 @@ def build_dialogue_result(sentences: list[dict]) -> tuple[str, str]:
     return full_text, srt_text
 
 
-def run_task_streaming(task_id: str) -> None:
+def run_task_streaming(task: dict) -> None:
     """执行转写任务，根据 diarization_enabled 选择模式。"""
+    task_id = task["id"]
     workdir = os.path.join(settings.TMP_DIR, f"task_{task_id}_{uuid.uuid4().hex[:8]}")
     os.makedirs(workdir, exist_ok=True)
     temp_storage_path = None
 
     try:
         # 1. 获取任务信息
-        task = db.get_task(task_id)
-        if not task:
-            raise RuntimeError(f"任务不存在: {task_id}")
-
         audio_file_id = task["audio_file_id"]
-        audio_file = db.get_audio_file(audio_file_id)
-        if not audio_file:
-            raise RuntimeError(f"音频文件不存在: {audio_file_id}")
-
         language = task.get("language")
         trim_start = task.get("trim_start")
         trim_end = task.get("trim_end")
         diarization_enabled = bool(task.get("diarization_enabled", False))
+
+        audio_file = db.get_audio_file(audio_file_id)
+        if not audio_file:
+            raise RuntimeError(f"音频文件不存在: {audio_file_id}")
 
         logger.info("task=%s 开始处理，模式=%s", task_id, "多人声(说话人分离)" if diarization_enabled else "单人声(分段转写)")
 
