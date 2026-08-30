@@ -83,7 +83,7 @@ def build_result(
 
         # 分配说话人（diar 中的时间是相对于段开始的，所以传入 0）
         speaker = None
-        if segment_diarizations and speaker_mappings:
+        if segment_diarizations and speaker_mappings and seg_idx < len(segment_diarizations) and seg_idx < len(speaker_mappings):
             diar = segment_diarizations[seg_idx]
             spk_map = speaker_mappings[seg_idx]
             if diar and spk_map:
@@ -197,8 +197,9 @@ def run_task_streaming(task: dict) -> None:
                     logger.info("task=%s 说话人分离段 %d/%d 跳过/失败", task_id, idx + 1, total)
 
                 # 每完成一段说话人分离就更新结果
-                speaker_mappings = align_speakers(segment_diarizations + [None] * (total - len(segment_diarizations)))
-                full_text, srt_text = build_result(results, seg_paths, segment_diarizations, speaker_mappings)
+                padded_diarizations = segment_diarizations + [None] * (total - len(segment_diarizations))
+                speaker_mappings = align_speakers(padded_diarizations)
+                full_text, srt_text = build_result(results, seg_paths, padded_diarizations, speaker_mappings)
                 db.update_partial_result(task_id, full_text, srt_text, total, total)
         else:
             segment_diarizations = [None] * total

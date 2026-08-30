@@ -30,7 +30,7 @@ def _load_pipeline(hf_token: str):
         logger.info("加载 pyannote.audio 说话人分离模型...")
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
+            token=hf_token,
         )
         _pipeline_loaded = True
         logger.info("pyannote.audio 模型加载完成")
