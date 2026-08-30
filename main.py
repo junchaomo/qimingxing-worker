@@ -13,7 +13,7 @@ import time
 
 import db
 from config import settings
-from pipeline import run_task
+from streaming_pipeline import run_task_streaming
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +39,7 @@ def run_once() -> bool:
     if not task:
         return False
     try:
-        run_task(task)
+        run_task_streaming(task)
     except Exception as exc:  # noqa: BLE001
         _handle_failure(task["id"], exc)
     return True
@@ -66,7 +66,7 @@ def main() -> None:
         logger.info("reap-only 模式完成，退出")
         return
 
-    logger.info("ASR Worker 启动，轮询间隔 %.1fs，模型=%s，idle_exit=%d",
+    logger.info("ASR Worker 启动（流式模式），轮询间隔 %.1fs，模型=%s，idle_exit=%d",
                 settings.POLL_INTERVAL_S, settings.DASHSCOPE_MODEL, args.idle_exit)
     idle = 0
     while True:

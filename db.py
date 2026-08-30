@@ -138,6 +138,22 @@ def update_progress(task_id: str, total: int, completed: int) -> None:
             )
 
 
+def update_partial_result(task_id: str, result_text: str, result_srt: str, total: int, completed: int) -> None:
+    """流式更新：每完成一段就更新部分结果，任务状态保持 processing。"""
+    with get_conn() as conn:
+        with conn.transaction():
+            conn.execute(
+                """
+                update transcription_tasks
+                set result_text=%s, result_srt=%s,
+                    total_segments=%s, completed_segments=%s,
+                    progress = case when %s = 0 then 0 else round(%s::numeric / %s, 4) end
+                where id=%s
+                """,
+                (result_text, result_srt, total, completed, total, completed, total, task_id),
+            )
+
+
 def get_audio_file(audio_file_id: str) -> dict | None:
     with get_conn() as conn:
         return conn.execute(
