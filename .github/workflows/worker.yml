@@ -40,6 +40,7 @@ jobs:
           ASR_SAMPLE_RATE: '16000'
           ENABLE_ITN: 'true'
           WORKER_CONCURRENCY: '4'
+          WORKER_THREADS: '5'
           VAD_SEGMENT_THRESHOLD_S: '30'
           MAX_SEGMENT_S: '60'
           POLL_INTERVAL_S: '3'
