@@ -49,8 +49,8 @@ class Settings:
 
     # --- 并发与限流 ---
     WORKER_CONCURRENCY: int = _int("WORKER_CONCURRENCY", 4)   # 每任务内并发段数
-    WORKER_THREADS: int = _int("WORKER_THREADS", 2)           # Worker 进程内并发任务数
-    GLOBAL_API_SEMAPHORE: int = _int("GLOBAL_API_SEMAPHORE", 16)  # 全局同时进行的 API 请求上限
+    WORKER_THREADS: int = _int("WORKER_THREADS", 5)           # Worker 进程内并发任务数
+    GLOBAL_API_SEMAPHORE: int = _int("GLOBAL_API_SEMAPHORE", 20)  # 全局同时进行的 API 请求上限
 
     # --- VAD 分段 ---
     VAD_SEGMENT_THRESHOLD_S: int = _int("VAD_SEGMENT_THRESHOLD_S", 30)   # 目标分段时长（按句子切分）
