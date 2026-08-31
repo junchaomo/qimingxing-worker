@@ -261,9 +261,19 @@ def transcribe_file_diarization(
 
         elif task_status == "FAILED":
             results = output.get("results", [])
+            # 记录阿里完整响应，便于定位失败原因（code/message 常为空或位于不同层级）
+            logger.error("DashScope Filetrans 任务 FAILED，完整响应: %s", task_data)
             error_msg = "未知错误"
-            if results and results[0].get("message"):
-                error_msg = results[0]["message"]
+            code = ""
+            if results:
+                r0 = results[0]
+                if isinstance(r0, dict):
+                    code = r0.get("code", "") or ""
+                    msg = r0.get("message") or r0.get("error") or r0.get("error_message") or ""
+                    if msg:
+                        error_msg = str(msg)
+            if code:
+                error_msg = f"{error_msg} (阿里错误码: {code})"
             raise RuntimeError(f"转写任务失败: {error_msg}")
 
         elif task_status in ("PENDING", "RUNNING", "QUEUED"):
