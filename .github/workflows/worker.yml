@@ -33,6 +33,11 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           STORAGE_BUCKET: ${{ secrets.STORAGE_BUCKET }}
+          # 阿里云 OSS（Filetrans 音频中转，阿里服务器无法直接访问 Supabase）
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           # 使用 Filetrans 异步模型，支持阿里自带的说话人分离
           DASHSCOPE_MODEL: qwen-audio-3.0-asr-flash-filetrans

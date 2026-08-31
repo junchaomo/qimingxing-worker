@@ -26,7 +26,7 @@ from asr_client import transcribe_file_diarization, transcribe_segment
 from audio import load_wav, probe_duration, transcode_to_wav, trim_wav
 from config import settings
 from postprocess import aggregate_language
-from storage import download, upload_and_get_url
+from storage import delete_oss_object, download, upload_and_get_url, upload_to_oss_and_sign_url
 from vad import segment_audio
 
 logger = logging.getLogger("worker.streaming")
@@ -209,11 +209,16 @@ def run_task_streaming(task: dict) -> None:
             # ===== 多人声模式：Filetrans 异步转写 + 说话人分离 =====
             logger.info("task=%s 使用 Filetrans 模式（说话人分离）", task_id)
 
-            # 上传到 Supabase 并生成签名 URL
-            logger.info("task=%s 上传音频到 Storage...", task_id)
-            temp_storage_path, file_url = upload_and_get_url(
-                settings.STORAGE_BUCKET, wav_path, prefix="asr_temp"
-            )
+            # 上传到阿里 OSS（首选）或 Supabase 并生成签名 URL，供 DashScope 下载
+            logger.info("task=%s 上传音频到 OSS/Supabase...", task_id)
+            oss_key = None
+            temp_storage_path = None
+            oss_key, file_url = upload_to_oss_and_sign_url(wav_path)
+            if not file_url:
+                # 未配置 OSS 时回退到 Supabase 签名 URL（阿里可能下载失败）
+                temp_storage_path, file_url = upload_and_get_url(
+                    settings.STORAGE_BUCKET, wav_path, prefix="asr_temp"
+                )
             logger.info("task=%s 已生成签名 URL", task_id)
 
             # `stage` 是用于前端展示的细分阶段，不等同于任务的
@@ -223,12 +228,17 @@ def run_task_streaming(task: dict) -> None:
 
             # 调用 Filetrans
             start_time = time.time()
-            full_text, detected_lang, sentences = transcribe_file_diarization(
-                file_url,
-                language=language,
-                poll_interval=5,
-                timeout=max(duration_s * 3, 600),
-            )
+            try:
+                full_text, detected_lang, sentences = transcribe_file_diarization(
+                    file_url,
+                    language=language,
+                    poll_interval=5,
+                    timeout=max(duration_s * 3, 600),
+                )
+            finally:
+                # 清理 OSS 临时音频；Supabase 临时文件由外层 finally 统一清理
+                if oss_key:
+                    delete_oss_object(oss_key)
             elapsed = time.time() - start_time
             logger.info("task=%s Filetrans 转写完成，耗时 %.0fs，句子数=%d", task_id, elapsed, len(sentences))
 

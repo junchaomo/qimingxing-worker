@@ -4,3 +4,4 @@ requests>=2.31.0              # DashScope API + Supabase Storage 下载/上传
 python-dotenv>=1.0.0          # 本地 .env 加载
 numpy>=1.26.0                 # 音频数组处理
 soundfile>=0.12.1             # 读取 16kHz mono WAV
+oss2>=2.18.0                  # 阿里云 OSS（Filetrans 音频中转）

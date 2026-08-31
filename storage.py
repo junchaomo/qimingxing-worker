@@ -82,3 +82,53 @@ def upload_and_get_url(bucket: str, local_path: str, prefix: str = "temp", conte
     upload(bucket, path, local_path, content_type)
     url = create_signed_url(bucket, path, expires_in=7200)  # 2小时有效
     return path, url
+
+
+def upload_to_oss_and_sign_url(local_path: str) -> tuple[str | None, str | None]:
+    """上传临时音频到阿里 OSS 并生成签名 URL（供 DashScope Filetrans 下载）。
+
+    阿里服务器访问 Supabase（国外 Cloudflare）不稳定，改用阿里 OSS 中转。
+    返回 (oss_key, 签名URL)；未配置 OSS 时返回 (None, None)。
+
+    Args:
+        local_path: 本地音频文件路径
+
+    Returns:
+        (oss_key, signed_url)，其中 signed_url 是带签名的临时公网 URL。
+    """
+    if not (settings.OSS_ACCESS_KEY_ID and settings.OSS_ACCESS_KEY_SECRET
+            and settings.OSS_BUCKET and settings.OSS_ENDPOINT):
+        logger.warning("OSS 未配置，跳过 OSS 中转")
+        return None, None
+
+    try:
+        import oss2
+    except ImportError:
+        logger.warning("oss2 未安装，跳过 OSS 中转")
+        return None, None
+
+    ext = os.path.splitext(local_path)[1] or ".wav"
+    key = f"{settings.OSS_TEMP_PREFIX}/{uuid.uuid4().hex}{ext}"
+
+    auth = oss2.Auth(settings.OSS_ACCESS_KEY_ID, settings.OSS_ACCESS_KEY_SECRET)
+    bucket = oss2.Bucket(auth, settings.OSS_ENDPOINT, settings.OSS_BUCKET)
+    bucket.put_object_from_file(key, local_path)
+    # 2 小时有效的签名 URL，供 DashScope 下载
+    signed_url = bucket.sign_url("GET", key, 7200)
+    logger.info("uploaded %s -> OSS %s", local_path, key)
+    return key, signed_url
+
+
+def delete_oss_object(key: str) -> None:
+    """删除 OSS 上的临时对象。"""
+    if not (settings.OSS_ACCESS_KEY_ID and settings.OSS_ACCESS_KEY_SECRET
+            and settings.OSS_BUCKET and settings.OSS_ENDPOINT):
+        return
+    try:
+        import oss2
+        auth = oss2.Auth(settings.OSS_ACCESS_KEY_ID, settings.OSS_ACCESS_KEY_SECRET)
+        bucket = oss2.Bucket(auth, settings.OSS_ENDPOINT, settings.OSS_BUCKET)
+        bucket.delete_object(key)
+        logger.info("deleted OSS object: %s", key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("删除 OSS 对象失败 %s: %s", key, exc)

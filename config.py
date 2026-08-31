@@ -32,6 +32,16 @@ class Settings:
     SUPABASE_SERVICE_ROLE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
     STORAGE_BUCKET: str = os.environ.get("STORAGE_BUCKET", "audio")
 
+    # --- 阿里云 OSS（Filetrans 中转存储）---
+    # DashScope Filetrans 需要公网下载音频 URL，但阿里服务器访问 Supabase 不稳定，
+    # 因此把临时音频上传到阿里 OSS，用签名 URL 提供给 DashScope。
+    OSS_ACCESS_KEY_ID: str = os.environ.get("OSS_ACCESS_KEY_ID", "")
+    OSS_ACCESS_KEY_SECRET: str = os.environ.get("OSS_ACCESS_KEY_SECRET", "")
+    OSS_BUCKET: str = os.environ.get("OSS_BUCKET", "")
+    # 例：北京 oss-cn-beijing.aliyuncs.com
+    OSS_ENDPOINT: str = os.environ.get("OSS_ENDPOINT", "")
+    OSS_TEMP_PREFIX: str = os.environ.get("OSS_TEMP_PREFIX", "asr_temp")
+
     # --- DashScope / Qwen-ASR (Filetrans 异步模式，支持说话人分离) ---
     DASHSCOPE_API_KEY: str = os.environ.get("DASHSCOPE_API_KEY", "")
     # 使用 Filetrans 模型，支持说话人分离
