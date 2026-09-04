@@ -55,5 +55,6 @@ jobs:
           # pyannote 说话人分离已禁用，改用阿里 Qwen3-ASR Filetrans 自带的说话人分离
           ENABLE_SPEAKER_DIARIZATION: 'false'
         run: |
-          # 空闲 60 轮（约 3 分钟）无任务即退出；有任务则持续处理直到 job 超时
-          python main.py --idle-exit 60
+          # 空闲 240 轮（约 12 分钟）无任务即退出；有任务则持续处理直到 job 超时。
+          # 提高存活时间可让一次启动的 job 覆盖随后入队的连续任务，减少反复调度。
+          python main.py --idle-exit 240
