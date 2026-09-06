@@ -180,12 +180,12 @@ def run_task_streaming(task: dict) -> None:
         if source_url:
             # URL 类型任务：用 yt-dlp 下载音频，上传到 Storage，回填 storage_path
             logger.info("task=%s 检测到 source_url，开始用 yt-dlp 下载", task_id)
-            db.update_task_stage(task_id, "downloading", 0.1)
+            db.update_task_stage(task_id, "transcribing", 0.1)
             downloaded_path, url_duration = download_audio_from_url(source_url, workdir)
             logger.info("task=%s yt-dlp 下载完成: %s", task_id, downloaded_path)
 
             # 上传到 Supabase Storage
-            db.update_task_stage(task_id, "uploading", 0.2)
+            db.update_task_stage(task_id, "transcribing", 0.2)
             import time as _time
             storage_path = f"url_audio/{task_id}_{int(_time.time())}.wav"
             upload_to_oss_and_sign_url(settings.STORAGE_BUCKET, storage_path, downloaded_path)
