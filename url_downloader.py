@@ -12,6 +12,7 @@ import json
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 
 logger = logging.getLogger("worker.url_downloader")
 
@@ -115,6 +116,17 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
     """
     os.makedirs(workdir, exist_ok=True)
 
+    # 判断是否是直接的音频/视频文件链接
+    direct_extensions = ('.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.wma',
+                       '.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv')
+    parsed = urllib.parse.urlparse(url)
+    is_direct_file = any(parsed.path.lower().endswith(ext) for ext in direct_extensions)
+
+    if is_direct_file:
+        # 直接文件链接：直接用 urllib 下载，不经过函数计算
+        logger.info("直接文件链接，本地直接下载: %s", url)
+        return _download_direct_file(url, workdir)
+
     if all([FC_ACCESS_KEY_ID, FC_ACCESS_KEY_SECRET, FC_ACCOUNT_ID]):
         logger.info("使用阿里云函数计算下载: %s", url)
         try:
@@ -125,6 +137,38 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
     else:
         logger.info("未配置函数计算 AccessKey，使用本地 yt-dlp 下载")
         return _download_local(url, workdir)
+
+
+def _download_direct_file(url: str, workdir: str) -> tuple[str, float]:
+    """直接下载音频/视频文件并转码为 wav。"""
+    parsed = urllib.parse.urlparse(url)
+    file_ext = os.path.splitext(parsed.path)[1] or '.mp3'
+    raw_path = os.path.join(workdir, f"raw_{uuid.uuid4().hex[:8]}{file_ext}")
+
+    logger.info("开始下载: %s -> %s", url, raw_path)
+
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            with open(raw_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except Exception as e:
+        raise RuntimeError(f"直接下载失败: {str(e)}")
+
+    if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
+        raise RuntimeError("下载的文件为空")
+
+    file_size = os.path.getsize(raw_path)
+    logger.info("下载完成，文件大小: %d bytes", file_size)
+
+    # 转码为 wav
+    return _transcode_to_wav(raw_path, workdir)
 
 
 def _download_via_fc(url: str, workdir: str) -> tuple[str, float]:
@@ -157,9 +201,20 @@ def _download_via_fc(url: str, workdir: str) -> tuple[str, float]:
     if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
         raise RuntimeError("OSS 下载的文件为空")
 
-    # 3. 用 ffmpeg 转码为 wav（16kHz 单声道）
+    # 3. 用 ffmpeg 转码为 wav
+    wav_path = _transcode_to_wav(raw_path, workdir)
+
+    # 4. 探测时长
+    duration = _probe_duration(wav_path)
+    logger.info("下载+转码完成: %s, 时长: %.1fs", wav_path, duration)
+
+    return wav_path, duration
+
+
+def _transcode_to_wav(raw_path: str, workdir: str) -> str:
+    """用 ffmpeg 将音频/视频文件转码为 16kHz 单声道 wav。"""
     wav_path = os.path.join(workdir, f"audio_{uuid.uuid4().hex[:8]}.wav")
-    logger.info("转码为 wav: %s", wav_path)
+    logger.info("转码为 wav: %s -> %s", raw_path, wav_path)
 
     try:
         subprocess.run(
@@ -186,11 +241,10 @@ def _download_via_fc(url: str, workdir: str) -> tuple[str, float]:
     except Exception:
         pass
 
-    # 4. 探测时长
-    duration = _probe_duration(wav_path)
-    logger.info("下载+转码完成: %s, 时长: %.1fs", wav_path, duration)
+    if not os.path.exists(wav_path) or os.path.getsize(wav_path) == 0:
+        raise RuntimeError("转码后的 wav 文件为空")
 
-    return wav_path, duration
+    return wav_path
 
 
 def _download_local(url: str, workdir: str) -> tuple[str, float]:
