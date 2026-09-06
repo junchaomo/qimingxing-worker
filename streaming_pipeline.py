@@ -247,6 +247,24 @@ def run_task_streaming(task: dict) -> None:
             # 写入 processing 会触发约束错误并让任务反复重试。
             db.update_task_stage(task_id, "transcribing", 0.1)
 
+            # 后台进度更新线程：Filetrans 异步转写过程中平滑递增进度（10% -> 90%）
+            stop_progress = threading.Event()
+            def progress_updater():
+                # 预估转写耗时：音频时长 * 1.5，最少 60 秒
+                estimated = max(duration_s * 1.5, 60)
+                start = time.time()
+                while not stop_progress.is_set():
+                    elapsed = time.time() - start
+                    # 进度从 10% 线性递增到 90%
+                    pct = min(0.9, 0.1 + (elapsed / estimated) * 0.8)
+                    try:
+                        db.update_task_stage(task_id, "transcribing", round(pct, 4))
+                    except Exception:
+                        pass
+                    time.sleep(5)
+            progress_thread = threading.Thread(target=progress_updater, daemon=True)
+            progress_thread.start()
+
             # 调用 Filetrans
             start_time = time.time()
             try:
@@ -257,6 +275,8 @@ def run_task_streaming(task: dict) -> None:
                     timeout=max(duration_s * 3, 600),
                 )
             finally:
+                stop_progress.set()
+                progress_thread.join(timeout=5)
                 # 清理 OSS 临时音频；Supabase 临时文件由外层 finally 统一清理
                 if oss_key:
                     delete_oss_object(oss_key)
