@@ -39,8 +39,8 @@ jobs:
           OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
           OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
-          # YouTube cookies（yt-dlp 下载 YouTube 视频时使用）
-          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          # 阿里云函数计算下载服务地址（优先使用，未配置则回退本地 yt-dlp）
+          FC_DOWNLOADER_URL: ${{ secrets.FC_DOWNLOADER_URL }}
           # 使用 Filetrans 异步模型，支持阿里自带的说话人分离
           DASHSCOPE_MODEL: qwen-audio-3.0-asr-flash-filetrans
           DASHSCOPE_BASE_URL: https://dashscope.aliyuncs.com/api/v1

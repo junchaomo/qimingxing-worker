@@ -1,12 +1,16 @@
-"""从视频/音频链接下载音频（yt-dlp 封装）。
+"""从视频/音频链接下载音频。
 
-支持 YouTube、Bilibili、直接音频/视频文件链接等 1000+ 平台。
-下载最佳质量音频，输出为 wav 格式供后续转写。
+优先调用阿里云函数计算下载服务（FC_DOWNLOADER_URL），
+函数计算用 yt-dlp 下载后上传 OSS，返回签名 URL，Worker 再下载到本地转码。
+如果未配置函数计算地址，回退到本地 yt-dlp 下载（保持向后兼容）。
 """
 import logging
 import os
 import subprocess
 import uuid
+import json
+import urllib.request
+import urllib.error
 
 logger = logging.getLogger("worker.url_downloader")
 
@@ -25,11 +29,107 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
         RuntimeError: 下载或转码失败
     """
     os.makedirs(workdir, exist_ok=True)
+
+    fc_url = os.environ.get("FC_DOWNLOADER_URL", "").strip()
+
+    if fc_url:
+        logger.info("使用阿里云函数计算下载: %s", url)
+        return _download_via_fc(url, workdir, fc_url)
+    else:
+        logger.info("未配置 FC_DOWNLOADER_URL，回退到本地 yt-dlp 下载")
+        return _download_local(url, workdir)
+
+
+def _download_via_fc(url: str, workdir: str, fc_url: str) -> tuple[str, float]:
+    """通过阿里云函数计算下载音频。"""
+    # 1. 调用函数计算 API
+    payload = json.dumps({"url": url}).encode("utf-8")
+    req = urllib.request.Request(
+        fc_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"函数计算下载失败 (HTTP {e.code}): {body}")
+    except Exception as e:
+        raise RuntimeError(f"函数计算调用失败: {str(e)}")
+
+    if not result.get("success"):
+        raise RuntimeError(f"函数计算下载失败: {result.get('error', 'unknown error')}")
+
+    signed_url = result.get("signed_url", "")
+    if not signed_url:
+        raise RuntimeError("函数计算未返回 signed_url")
+
+    file_ext = result.get("file_ext", ".webm")
+    logger.info("函数计算下载完成，文件大小: %d bytes", result.get("file_size", 0))
+
+    # 2. 从 OSS 签名 URL 下载文件到本地
+    raw_path = os.path.join(workdir, f"raw_{uuid.uuid4().hex[:8]}{file_ext}")
+    logger.info("从 OSS 下载到本地: %s", raw_path)
+
+    try:
+        with urllib.request.urlopen(signed_url, timeout=300) as resp:
+            with open(raw_path, "wb") as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except Exception as e:
+        raise RuntimeError(f"从 OSS 下载失败: {str(e)}")
+
+    if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
+        raise RuntimeError("OSS 下载的文件为空")
+
+    # 3. 用 ffmpeg 转码为 wav（16kHz 单声道）
+    wav_path = os.path.join(workdir, f"audio_{uuid.uuid4().hex[:8]}.wav")
+    logger.info("转码为 wav: %s", wav_path)
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", raw_path,
+                "-ar", "16000",
+                "-ac", "1",
+                "-vn",
+                wav_path,
+            ],
+            capture_output=True,
+            timeout=300,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg 转码失败: {e.stderr[-300:] if e.stderr else str(e)}")
+    except Exception as e:
+        raise RuntimeError(f"ffmpeg 转码失败: {str(e)}")
+
+    # 清理原始文件
+    try:
+        os.remove(raw_path)
+    except Exception:
+        pass
+
+    # 4. 探测时长
+    duration = _probe_duration(wav_path)
+    logger.info("下载+转码完成: %s, 时长: %.1fs", wav_path, duration)
+
+    return wav_path, duration
+
+
+def _download_local(url: str, workdir: str) -> tuple[str, float]:
+    """本地 yt-dlp 下载（回退方案）。"""
     base_name = f"audio_{uuid.uuid4().hex[:8]}"
     output_template = os.path.join(workdir, f"{base_name}.%(ext)s")
 
-    # yt-dlp 下载最佳质量音频
-    logger.info("开始用 yt-dlp 下载: %s", url)
+    logger.info("开始用本地 yt-dlp 下载: %s", url)
     cmd = [
         "yt-dlp",
         "-f", "bestaudio/best",
@@ -37,26 +137,12 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
         "--audio-format", "wav",
         "--audio-quality", "0",
         "-o", output_template,
-        "--no-playlist",  # 只下载单个视频，不下载整个播放列表
-        "--max-filesize", "500M",  # 限制最大 500MB
-        "--no-thumbnails",  # 跳过封面图下载（避免 webp 格式问题）
-        "--extractor-args", "youtube:player_client=web,ios",  # 使用 web/ios 客户端绕过认证
+        "--no-playlist",
+        "--max-filesize", "500M",
+        "--no-thumbnails",
         "--no-check-certificate",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--add-header", "Referer:https://www.bilibili.com/",
-        "--add-header", "Accept-Language:zh-CN,zh;q=0.9,en;q=0.8",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
-
-    # 如果配置了 YouTube cookies，写入临时文件并使用
-    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    cookies_file = None
-    if cookies_content:
-        cookies_file = os.path.join(workdir, "cookies.txt")
-        with open(cookies_file, "w", encoding="utf-8") as f:
-            f.write(cookies_content)
-        cmd.extend(["--cookies", cookies_file])
-        logger.info("使用配置的 YouTube cookies")
-
     cmd.append(url)
 
     try:
@@ -64,7 +150,7 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,  # 10 分钟超时
+            timeout=600,
         )
         if result.returncode != 0:
             logger.error("yt-dlp 下载失败: %s", result.stderr[-500:])
@@ -77,16 +163,14 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
     # 查找下载的 wav 文件
     wav_path = os.path.join(workdir, f"{base_name}.wav")
     if not os.path.exists(wav_path):
-        # 可能扩展名不同，查找所有以 base_name 开头的文件
         candidates = [f for f in os.listdir(workdir) if f.startswith(base_name)]
         if candidates:
             wav_path = os.path.join(workdir, candidates[0])
         else:
             raise RuntimeError("yt-dlp 下载完成但未找到输出文件")
 
-    # 探测时长
     duration = _probe_duration(wav_path)
-    logger.info("下载完成: %s, 时长: %.1fs", wav_path, duration)
+    logger.info("本地下载完成: %s, 时长: %.1fs", wav_path, duration)
 
     return wav_path, duration
 
