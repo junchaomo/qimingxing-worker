@@ -42,8 +42,19 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
         "--extractor-args", "youtube:player_client=web,ios",  # 使用 web/ios 客户端绕过认证
         "--no-check-certificate",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        url,
     ]
+
+    # 如果配置了 YouTube cookies，写入临时文件并使用
+    cookies_content = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    cookies_file = None
+    if cookies_content:
+        cookies_file = os.path.join(workdir, "cookies.txt")
+        with open(cookies_file, "w", encoding="utf-8") as f:
+            f.write(cookies_content)
+        cmd.extend(["--cookies", cookies_file])
+        logger.info("使用配置的 YouTube cookies")
+
+    cmd.append(url)
 
     try:
         result = subprocess.run(
