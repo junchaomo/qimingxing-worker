@@ -5,11 +5,28 @@
 支持 YouTube、Bilibili、直接音频/视频文件链接等 1000+ 平台。
 """
 import os
+import sys
 import json
-import subprocess
 import uuid
 import shutil
+
+# 确保代码包目录在 Python 路径中
+_code_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _code_dir)
+
 import oss2
+
+try:
+    import yt_dlp
+except ImportError as e:
+    yt_dlp = None
+    _import_error = str(e)
+    _dir_contents = os.listdir(_code_dir)[:30]
+    _yt_dlp_exists = os.path.exists(os.path.join(_code_dir, 'yt_dlp', '__init__.py'))
+else:
+    _import_error = None
+    _dir_contents = None
+    _yt_dlp_exists = None
 
 
 def handler(event, context):
@@ -35,31 +52,42 @@ def handler(event, context):
     if not url:
         return _response(400, {'error': 'url is required'})
 
+    # 检查 yt_dlp 是否导入成功
+    if yt_dlp is None:
+        return _response(500, {
+            'error': f'yt_dlp import failed: {_import_error}',
+            'code_dir': _code_dir,
+            'dir_contents': _dir_contents,
+            'yt_dlp_exists': _yt_dlp_exists,
+            'python_path': sys.path[:5],
+        })
+
     # 创建临时目录
     workdir = f'/tmp/download_{uuid.uuid4().hex[:8]}'
     os.makedirs(workdir, exist_ok=True)
 
     try:
-        # 1. yt-dlp 下载音频（不转码，转码交给 Worker）
+        # 1. yt-dlp 下载音频（用 Python API，不转码，转码交给 Worker）
         output_template = os.path.join(workdir, 'audio.%(ext)s')
-        cmd = [
-            'yt-dlp',
-            '-f', 'bestaudio/best',
-            '-o', output_template,
-            '--no-playlist',
-            '--max-filesize', '500M',
-            '--no-thumbnails',
-            '--no-check-certificate',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            url,
-        ]
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'noplaylist': True,
+            'max_filesize': 500 * 1024 * 1024,  # 500MB
+            'no_thumbnails': True,
+            'nocheckcertificate': True,
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': 'https://www.bilibili.com/',
+            },
+        }
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300
-        )
-        if result.returncode != 0:
-            err_msg = result.stderr[-500:] if result.stderr else 'unknown error'
-            return _response(500, {'error': f'download failed: {err_msg}'})
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
         # 2. 查找下载的文件
         audio_path = None
@@ -87,8 +115,6 @@ def handler(event, context):
             'signed_url': signed_url,
         })
 
-    except subprocess.TimeoutExpired:
-        return _response(504, {'error': 'download timeout (exceeded 5 minutes)'})
     except Exception as e:
         return _response(500, {'error': f'internal error: {str(e)}'})
     finally:

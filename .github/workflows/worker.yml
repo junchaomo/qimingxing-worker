@@ -39,7 +39,13 @@ jobs:
           OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
           OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
-          # 阿里云函数计算下载服务地址（优先使用，未配置则回退本地 yt-dlp）
+          # 阿里云函数计算下载服务（优先使用，未配置则回退本地 yt-dlp）
+          FC_ACCESS_KEY_ID: ${{ secrets.FC_ACCESS_KEY_ID }}
+          FC_ACCESS_KEY_SECRET: ${{ secrets.FC_ACCESS_KEY_SECRET }}
+          FC_REGION: cn-hangzhou
+          FC_ACCOUNT_ID: ${{ secrets.FC_ACCOUNT_ID }}
+          FC_FUNCTION_NAME: svc-8ecfe18f$downloader
+          # 旧的 FC_DOWNLOADER_URL 已废弃，保留兼容
           FC_DOWNLOADER_URL: ${{ secrets.FC_DOWNLOADER_URL }}
           # 使用 Filetrans 异步模型，支持阿里自带的说话人分离
           DASHSCOPE_MODEL: qwen-audio-3.0-asr-flash-filetrans

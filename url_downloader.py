@@ -1,18 +1,96 @@
 """从视频/音频链接下载音频。
 
-优先调用阿里云函数计算下载服务（FC_DOWNLOADER_URL），
+优先调用阿里云函数计算下载服务（通过 FC SDK 调用），
 函数计算用 yt-dlp 下载后上传 OSS，返回签名 URL，Worker 再下载到本地转码。
-如果未配置函数计算地址，回退到本地 yt-dlp 下载（保持向后兼容）。
+如果未配置函数计算 AccessKey，回退到本地 yt-dlp 下载（保持向后兼容）。
 """
 import logging
 import os
 import subprocess
 import uuid
 import json
+import base64
 import urllib.request
 import urllib.error
 
 logger = logging.getLogger("worker.url_downloader")
+
+# 函数计算配置
+FC_ACCESS_KEY_ID = os.environ.get("FC_ACCESS_KEY_ID", os.environ.get("OSS_ACCESS_KEY_ID", "")).strip()
+FC_ACCESS_KEY_SECRET = os.environ.get("FC_ACCESS_KEY_SECRET", os.environ.get("OSS_ACCESS_KEY_SECRET", "")).strip()
+FC_REGION = os.environ.get("FC_REGION", "cn-hangzhou").strip()
+FC_ACCOUNT_ID = os.environ.get("FC_ACCOUNT_ID", "").strip()
+FC_FUNCTION_NAME = os.environ.get("FC_FUNCTION_NAME", "svc-8ecfe18f$downloader").strip()
+
+# 延迟导入 SDK，避免未配置时影响启动
+_fc_client = None
+
+
+def _get_fc_client():
+    """获取函数计算客户端（懒加载）。"""
+    global _fc_client
+    if _fc_client is not None:
+        return _fc_client
+    
+    if not all([FC_ACCESS_KEY_ID, FC_ACCESS_KEY_SECRET, FC_ACCOUNT_ID]):
+        return None
+    
+    try:
+        from alibabacloud_fc20230330.client import Client as FCClient
+        from alibabacloud_tea_openapi import models as open_api_models
+        
+        config = open_api_models.Config(
+            access_key_id=FC_ACCESS_KEY_ID,
+            access_key_secret=FC_ACCESS_KEY_SECRET,
+            endpoint=f"{FC_ACCOUNT_ID}.{FC_REGION}.fc.aliyuncs.com"
+        )
+        _fc_client = FCClient(config)
+        logger.info("函数计算客户端初始化成功")
+        return _fc_client
+    except Exception as e:
+        logger.warning("函数计算客户端初始化失败: %s", e)
+        return None
+
+
+def _invoke_fc(url: str) -> dict:
+    """调用函数计算下载音频。"""
+    from alibabacloud_fc20230330 import models as fc_models
+    
+    client = _get_fc_client()
+    if client is None:
+        raise RuntimeError("函数计算客户端未初始化")
+    
+    payload = json.dumps({"url": url}).encode("utf-8")
+    
+    code_location = fc_models.InputCodeLocation()  # 不需要
+    req = fc_models.InvokeFunctionRequest(
+        body=payload
+    )
+    
+    resp = client.invoke_function(FC_FUNCTION_NAME, req)
+    
+    # 解析响应
+    body = resp.body.read().decode("utf-8") if hasattr(resp.body, 'read') else str(resp.body)
+    
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"函数计算返回非 JSON: {body[:500]}")
+    
+    # 函数计算的响应可能嵌套在 body 字段中
+    if "body" in result and isinstance(result["body"], str):
+        try:
+            result = json.loads(result["body"])
+        except json.JSONDecodeError:
+            pass
+    
+    if result.get("statusCode", 200) != 200:
+        raise RuntimeError(f"函数计算错误: {result.get('error', result)}")
+    
+    if not result.get("success"):
+        raise RuntimeError(f"函数计算下载失败: {result.get('error', 'unknown error')}")
+    
+    return result
 
 
 def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
@@ -30,39 +108,23 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
     """
     os.makedirs(workdir, exist_ok=True)
 
-    fc_url = os.environ.get("FC_DOWNLOADER_URL", "").strip()
-
-    if fc_url:
+    if all([FC_ACCESS_KEY_ID, FC_ACCESS_KEY_SECRET, FC_ACCOUNT_ID]):
         logger.info("使用阿里云函数计算下载: %s", url)
-        return _download_via_fc(url, workdir, fc_url)
+        try:
+            return _download_via_fc(url, workdir)
+        except Exception as e:
+            logger.warning("函数计算下载失败，回退到本地 yt-dlp: %s", e)
+            return _download_local(url, workdir)
     else:
-        logger.info("未配置 FC_DOWNLOADER_URL，回退到本地 yt-dlp 下载")
+        logger.info("未配置函数计算 AccessKey，使用本地 yt-dlp 下载")
         return _download_local(url, workdir)
 
 
-def _download_via_fc(url: str, workdir: str, fc_url: str) -> tuple[str, float]:
+def _download_via_fc(url: str, workdir: str) -> tuple[str, float]:
     """通过阿里云函数计算下载音频。"""
     # 1. 调用函数计算 API
-    payload = json.dumps({"url": url}).encode("utf-8")
-    req = urllib.request.Request(
-        fc_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"函数计算下载失败 (HTTP {e.code}): {body}")
-    except Exception as e:
-        raise RuntimeError(f"函数计算调用失败: {str(e)}")
-
-    if not result.get("success"):
-        raise RuntimeError(f"函数计算下载失败: {result.get('error', 'unknown error')}")
-
+    result = _invoke_fc(url)
+    
     signed_url = result.get("signed_url", "")
     if not signed_url:
         raise RuntimeError("函数计算未返回 signed_url")

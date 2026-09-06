@@ -17,3 +17,6 @@ tmp/
 # 系统
 .DS_Store
 Thumbs.db
+
+fc_downloader/
+fc_downloader.zip
