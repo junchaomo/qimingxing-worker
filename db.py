@@ -200,6 +200,32 @@ def update_audio_duration(audio_file_id: str, seconds: int) -> None:
             )
 
 
+def update_audio_file_storage(audio_file_id: str, storage_path: str, duration: int = 0) -> None:
+    """URL 下载后回填 storage_path 和时长。"""
+    with get_conn() as conn:
+        with conn.transaction():
+            conn.execute(
+                "update audio_files set storage_path=%s, duration=%s, status='uploaded' where id=%s",
+                (storage_path, duration, audio_file_id),
+            )
+
+
+def update_task_status(task_id: str, status: str, stage: str | None = None) -> None:
+    """更新任务状态和可选的阶段。"""
+    with get_conn() as conn:
+        with conn.transaction():
+            if stage:
+                conn.execute(
+                    "update transcription_tasks set status=%s, stage=%s where id=%s",
+                    (status, stage, task_id),
+                )
+            else:
+                conn.execute(
+                    "update transcription_tasks set status=%s where id=%s",
+                    (status, task_id),
+                )
+
+
 def get_task_retry_count(task_id: str) -> int:
     with get_conn() as conn:
         row = conn.execute(

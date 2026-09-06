@@ -27,6 +27,7 @@ from audio import load_wav, probe_duration, transcode_to_wav, trim_wav
 from config import settings
 from postprocess import aggregate_language
 from storage import delete_oss_object, download, upload_and_get_url, upload_to_oss_and_sign_url
+from url_downloader import download_audio_from_url
 from vad import segment_audio
 
 logger = logging.getLogger("worker.streaming")
@@ -175,8 +176,26 @@ def run_task_streaming(task: dict) -> None:
         logger.info("task=%s 开始处理，模式=%s", task_id, "多人声(说话人分离)" if diarization_enabled else "单人声(分段转写)")
 
         # 2. 下载原始音频
-        storage_path = audio_file["storage_path"]
-        raw_path = download(settings.STORAGE_BUCKET, storage_path, workdir)
+        source_url = task.get("source_url") or audio_file.get("source_url")
+        if source_url:
+            # URL 类型任务：用 yt-dlp 下载音频，上传到 Storage，回填 storage_path
+            logger.info("task=%s 检测到 source_url，开始用 yt-dlp 下载", task_id)
+            db.update_task_status(task_id, "processing", "正在下载音频...")
+            downloaded_path, url_duration = download_audio_from_url(source_url, workdir)
+            logger.info("task=%s yt-dlp 下载完成: %s", task_id, downloaded_path)
+
+            # 上传到 Supabase Storage
+            import time as _time
+            storage_path = f"url_audio/{task_id}_{int(_time.time())}.wav"
+            upload_to_oss_and_sign_url(settings.STORAGE_BUCKET, storage_path, downloaded_path)
+            logger.info("task=%s 已上传到 Storage: %s", task_id, storage_path)
+
+            # 回填 audio_file 的 storage_path 和 duration
+            db.update_audio_file_storage(audio_file_id, storage_path, int(round(url_duration)))
+            raw_path = downloaded_path
+        else:
+            storage_path = audio_file["storage_path"]
+            raw_path = download(settings.STORAGE_BUCKET, storage_path, workdir)
         logger.info("task=%s 已下载原始音频", task_id)
 
         # 3. 转码为 WAV
