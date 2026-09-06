@@ -43,6 +43,8 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
         "--extractor-args", "youtube:player_client=web,ios",  # 使用 web/ios 客户端绕过认证
         "--no-check-certificate",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--add-header", "Referer:https://www.bilibili.com/",
+        "--add-header", "Accept-Language:zh-CN,zh;q=0.9,en;q=0.8",
     ]
 
     # 如果配置了 YouTube cookies，写入临时文件并使用
