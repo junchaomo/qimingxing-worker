@@ -39,11 +39,18 @@ def _get_fc_client():
         from alibabacloud_fc20230330.client import Client as FCClient
         from alibabacloud_tea_openapi import models as open_api_models
         
+        from alibabacloud_fc20230330 import models as fc_models
+        from alibabacloud_tea_openapi import models as open_api_models
+        
         config = open_api_models.Config(
             access_key_id=FC_ACCESS_KEY_ID,
             access_key_secret=FC_ACCESS_KEY_SECRET,
             endpoint=f"{FC_ACCOUNT_ID}.{FC_REGION}.fc.aliyuncs.com"
         )
+        # 设置较长的超时时间，函数计算下载音频可能需要几分钟
+        config.connect_timeout = 30000  # 30秒连接超时
+        config.read_timeout = 600000   # 10分钟读取超时
+        
         _fc_client = FCClient(config)
         logger.info("函数计算客户端初始化成功")
         return _fc_client
@@ -201,7 +208,7 @@ def _download_local(url: str, workdir: str) -> tuple[str, float]:
         "-o", output_template,
         "--no-playlist",
         "--max-filesize", "500M",
-        "--no-thumbnails",
+        "--no-thumbnail",
         "--no-check-certificate",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
