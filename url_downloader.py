@@ -168,7 +168,13 @@ def _download_direct_file(url: str, workdir: str) -> tuple[str, float]:
     logger.info("下载完成，文件大小: %d bytes", file_size)
 
     # 转码为 wav
-    return _transcode_to_wav(raw_path, workdir)
+    wav_path = _transcode_to_wav(raw_path, workdir)
+
+    # 探测时长
+    duration = _probe_duration(wav_path)
+    logger.info("直接下载+转码完成: %s, 时长: %.1fs", wav_path, duration)
+
+    return wav_path, duration
 
 
 def _download_via_fc(url: str, workdir: str) -> tuple[str, float]:
