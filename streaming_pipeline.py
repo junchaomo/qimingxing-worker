@@ -13,6 +13,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -177,9 +178,6 @@ def run_task_streaming(task: dict) -> None:
 
         # 2. 下载原始音频
         source_url = task.get("source_url") or audio_file.get("source_url")
-        logger.info("task=%s DIAG source_url=%s audio_storage_path=%s SUPABASE_URL=%s STORAGE_BUCKET=%s task_keys_has_source=%s",
-                    task_id, str(source_url)[:80], audio_file.get("storage_path"),
-                    settings.SUPABASE_URL, settings.STORAGE_BUCKET, "source_url" in task)
         if source_url:
             # URL 类型任务：用 yt-dlp 下载音频，上传到 Storage，回填 storage_path
             logger.info("task=%s 检测到 source_url，开始用 yt-dlp 下载", task_id)
@@ -187,9 +185,20 @@ def run_task_streaming(task: dict) -> None:
             downloaded_path, url_duration = download_audio_from_url(source_url, workdir)
             logger.info("task=%s yt-dlp 下载完成: %s", task_id, downloaded_path)
 
-            # 上传到 Supabase Storage
+            # 上传到 Supabase Storage（先压缩为 mp3，避免超过免费版 50MB 单对象限制）
             db.update_task_stage(task_id, "transcribing", 0.2)
-            storage_path, _ = upload_and_get_url(settings.STORAGE_BUCKET, downloaded_path, prefix="url_audio")
+            mp3_path = os.path.join(workdir, f"audio_{uuid.uuid4().hex[:8]}.mp3")
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", downloaded_path,
+                     "-ar", "16000", "-ac", "1", "-b:a", "32k", "-vn", mp3_path],
+                    capture_output=True, timeout=300, check=True,
+                )
+                upload_source = mp3_path
+            except Exception as e:
+                logger.warning("task=%s mp3 压缩失败，回退上传 wav: %s", task_id, e)
+                upload_source = downloaded_path
+            storage_path, _ = upload_and_get_url(settings.STORAGE_BUCKET, upload_source, prefix="url_audio")
             logger.info("task=%s 已上传到 Storage: %s", task_id, storage_path)
 
             # 回填 audio_file 的 storage_path 和 duration
