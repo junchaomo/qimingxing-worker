@@ -10,13 +10,17 @@
    - 整段转写，支持说话人分离
    - 无实时进度，任务完成后显示结果
 """
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
 import uuid
+
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -32,6 +36,55 @@ from url_downloader import download_audio_from_url
 from vad import segment_audio
 
 logger = logging.getLogger("worker.streaming")
+
+
+def generate_title_brief(text: str) -> tuple[str | None, str | None]:
+    """调用 Qwen 文本模型为转写内容生成标题和简介（所有用户免费）。
+
+    失败时返回 (None, None)，不阻断主流程。用 qwen-turbo（极低成本）。
+    """
+    if not text or not text.strip():
+        return None, None
+    if not settings.DASHSCOPE_API_KEY:
+        return None, None
+    try:
+        url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+        payload = {
+            "model": "qwen-turbo",
+            "input": {
+                "messages": [
+                    {"role": "system", "content": "你是音频转写内容整理助手，只输出严格 JSON，不输出其他任何文字。"},
+                    {"role": "user", "content": (
+                        "请阅读以下音频转写内容，生成：\n"
+                        "- title：简洁标题，不超过 20 字，概括主要内容，不加引号\n"
+                        "- brief：一句话简介，不超过 60 字\n\n"
+                        "只输出 JSON：{\"title\": \"...\", \"brief\": \"...\"}\n\n"
+                        f"转写内容：\n{text[:3000]}"
+                    )},
+                ]
+            },
+            "parameters": {"result_format": "message", "max_tokens": 200, "temperature": 0.3},
+        }
+        headers = {
+            "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        if resp.status_code != 200:
+            logger.warning("标题生成失败 HTTP %s: %s", resp.status_code, resp.text[:300])
+            return None, None
+        data = resp.json()
+        content = data["output"]["choices"][0]["message"]["content"]
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
+        if fence:
+            content = fence.group(1)
+        parsed = json.loads(content.strip())
+        title = str(parsed.get("title", "")).strip() or None
+        brief = str(parsed.get("brief", "")).strip() or None
+        return title, brief
+    except Exception as e:
+        logger.warning("标题简介生成失败: %s", e)
+        return None, None
 
 
 def build_result_simple(
@@ -339,6 +392,15 @@ def run_task_streaming(task: dict) -> None:
 
             detected_lang = aggregate_language(lang_list) or language
             result_text, result_srt = build_result_simple(results, seg_paths)
+
+        # 6.5 自动生成标题和简介（所有用户；失败不阻断）
+        try:
+            title, brief = generate_title_brief(result_text)
+            if title or brief:
+                db.update_task_title_brief(task_id, title, brief)
+                logger.info("task=%s 已生成标题: %s", task_id, title)
+        except Exception as e:
+            logger.warning("task=%s 标题简介生成异常: %s", task_id, e)
 
         # 7. 标记任务完成
         db.mark_task_completed(task_id, result_text, result_srt, 1)
