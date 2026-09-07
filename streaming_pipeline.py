@@ -177,6 +177,9 @@ def run_task_streaming(task: dict) -> None:
 
         # 2. 下载原始音频
         source_url = task.get("source_url") or audio_file.get("source_url")
+        logger.info("task=%s DIAG source_url=%s audio_storage_path=%s SUPABASE_URL=%s STORAGE_BUCKET=%s task_keys_has_source=%s",
+                    task_id, str(source_url)[:80], audio_file.get("storage_path"),
+                    settings.SUPABASE_URL, settings.STORAGE_BUCKET, "source_url" in task)
         if source_url:
             # URL 类型任务：用 yt-dlp 下载音频，上传到 Storage，回填 storage_path
             logger.info("task=%s 检测到 source_url，开始用 yt-dlp 下载", task_id)
