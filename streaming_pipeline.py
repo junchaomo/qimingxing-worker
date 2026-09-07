@@ -186,9 +186,7 @@ def run_task_streaming(task: dict) -> None:
 
             # 上传到 Supabase Storage
             db.update_task_stage(task_id, "transcribing", 0.2)
-            import time as _time
-            storage_path = f"url_audio/{task_id}_{int(_time.time())}.wav"
-            upload_to_oss_and_sign_url(settings.STORAGE_BUCKET, storage_path, downloaded_path)
+            storage_path, _ = upload_and_get_url(settings.STORAGE_BUCKET, downloaded_path, prefix="url_audio")
             logger.info("task=%s 已上传到 Storage: %s", task_id, storage_path)
 
             # 回填 audio_file 的 storage_path 和 duration
