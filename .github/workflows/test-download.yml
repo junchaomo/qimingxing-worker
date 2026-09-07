@@ -1,0 +1,40 @@
+name: test-download
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install yt-dlp
+        run: pip install -U yt-dlp
+
+      - name: Test bilibili download
+        run: |
+          yt-dlp --version
+          echo "=== 测试1: 带 Referer ==="
+          yt-dlp -f "bestaudio/best" --extract-audio --audio-format wav --audio-quality 0 \
+            -o "/tmp/t1.%(ext)s" --no-playlist --max-filesize 100M \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --referer "https://www.bilibili.com/" \
+            "BV1GJ411x7h7" || echo "TEST1_FAILED"
+          ls -la /tmp/ 2>/dev/null || true
+
+          echo "=== 测试2: 完整 URL ==="
+          yt-dlp -f "bestaudio/best" --extract-audio --audio-format wav --audio-quality 0 \
+            -o "/tmp/t2.%(ext)s" --no-playlist --max-filesize 100M \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --referer "https://www.bilibili.com/" \
+            "https://www.bilibili.com/video/BV1GJ411x7h7" || echo "TEST2_FAILED"
+          ls -la /tmp/ 2>/dev/null || true
