@@ -1,4 +1,4 @@
-"""从视频/音频链接下载音频。
+﻿"""从视频/音频链接下载音频。
 
 优先调用阿里云函数计算下载服务（通过 FC SDK 调用），
 函数计算用 yt-dlp 下载后上传 OSS，返回签名 URL，Worker 再下载到本地转码。
@@ -127,11 +127,6 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
         logger.info("直接文件链接，本地直接下载: %s", url)
         return _download_direct_file(url, workdir)
 
-    # Bilibili 专用通道：官方 API 获取音频流（yt-dlp 会触发 412，故不走通用流程）
-    if any(host in parsed.hostname for host in ("bilibili.com", "b23.tv", "bili2233.cn")):
-        logger.info("Bilibili 链接，使用官方 API 下载: %s", url)
-        return _download_bilibili(url, workdir)
-
     if all([FC_ACCESS_KEY_ID, FC_ACCESS_KEY_SECRET, FC_ACCOUNT_ID]):
         logger.info("使用阿里云函数计算下载: %s", url)
         try:
@@ -142,111 +137,6 @@ def download_audio_from_url(url: str, workdir: str) -> tuple[str, float]:
     else:
         logger.info("未配置函数计算 AccessKey，使用本地 yt-dlp 下载")
         return _download_local(url, workdir)
-
-
-def _download_bilibili(url: str, workdir: str) -> tuple[str, float]:
-    """Bilibili 专用下载：官方 API 获取音频流并转码为 wav。
-
-    yt-dlp 访问 Bilibili 会被 412（Precondition Failed）拦截，
-    改用官方公开 API：view 拿 cid → playurl 拿音频直链 → 下载。
-    """
-    import re
-    import json as _json
-
-    UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-    def _get_json(url: str, referer: str) -> dict:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": UA,
-            "Referer": referer,
-        })
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return _json.loads(resp.read().decode("utf-8", "ignore"))
-
-    # 解析短链跳转
-    if "b23.tv" in url or "bili2233.cn" in url:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                url = resp.geturl()
-                logger.info("Bilibili 短链解析为: %s", url)
-        except Exception as e:
-            raise RuntimeError(f"Bilibili 短链解析失败: {e}")
-
-    bvid = None
-    aid = None
-    m = re.search(r"BV[0-9A-Za-z]{10}", url)
-    if m:
-        bvid = m.group(0)
-    else:
-        m = re.search(r"/(av\d+)", url)
-        if m:
-            aid = m.group(1)
-    if not bvid and not aid:
-        raise RuntimeError(f"无法从链接解析 Bilibili 视频 ID: {url}")
-
-    # 1. view API 拿 cid / 标题
-    if bvid:
-        view_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-    else:
-        view_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid[2:]}"
-    view_data = _get_json(view_url, "https://www.bilibili.com/")
-    if view_data.get("code") != 0:
-        raise RuntimeError(f"Bilibili 获取视频信息失败: {view_data.get('message')}")
-    data = view_data["data"]
-    cid = data["cid"]
-    title = data.get("title", "") or ""
-    logger.info("Bilibili 视频: %s (bvid=%s cid=%s)", title, bvid or aid, cid)
-
-    # 2. playurl API 拿音频直链（dash）
-    play_url = f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&fnval=16&fourk=1"
-    if not bvid:
-        play_url = f"https://api.bilibili.com/x/player/playurl?aid={aid[2:]}&cid={cid}&fnval=16&fourk=1"
-    play_data = _get_json(play_url, "https://www.bilibili.com/")
-    if play_data.get("code") != 0:
-        raise RuntimeError(f"Bilibili 获取播放地址失败: {play_data.get('message')}")
-
-    audio_url = None
-    dash = play_data.get("data", {}).get("dash") or {}
-    audio_list = dash.get("audio") or []
-    if audio_list:
-        # 选码率最高的一条
-        audio_url = max(audio_list, key=lambda a: a.get("bandwidth", 0)).get("baseUrl") or \
-            max(audio_list, key=lambda a: a.get("bandwidth", 0)).get("base_url")
-    if not audio_url:
-        durl = play_data.get("data", {}).get("durl") or []
-        if durl:
-            audio_url = durl[0].get("url")
-    if not audio_url:
-        raise RuntimeError("无法获取 Bilibili 音频流地址")
-
-    # 3. 下载音频流（m4s），带 Referer 防盗链
-    raw_path = os.path.join(workdir, f"raw_{uuid.uuid4().hex[:8]}.m4s")
-    logger.info("开始下载 Bilibili 音频流: %s", audio_url[:120])
-    dl_headers = {
-        "User-Agent": UA,
-        "Referer": f"https://www.bilibili.com/video/{bvid or aid}",
-    }
-    try:
-        req = urllib.request.Request(audio_url, headers=dl_headers)
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            with open(raw_path, "wb") as f:
-                while True:
-                    chunk = resp.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-    except Exception as e:
-        raise RuntimeError(f"Bilibili 音频流下载失败: {e}")
-
-    if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
-        raise RuntimeError("Bilibili 下载的文件为空")
-
-    # 4. 转码 wav + 探测时长
-    wav_path = _transcode_to_wav(raw_path, workdir)
-    duration = _probe_duration(wav_path)
-    logger.info("Bilibili 下载+转码完成: %s, 时长: %.1fs", wav_path, duration)
-    return wav_path, duration
 
 
 def _download_direct_file(url: str, workdir: str) -> tuple[str, float]:
