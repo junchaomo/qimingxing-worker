@@ -61,43 +61,71 @@ def _get_fc_client():
 
 
 def _invoke_fc(url: str) -> dict:
-    """调用函数计算下载音频。"""
-    from alibabacloud_fc20230330 import models as fc_models
-    
+    """调用函数计算下载音频。
+
+    FC 3.0 API 路径为 POST /2023-03-30/functions/{functionName}/invocations，
+    其中 functionName 是 "service$function" 形式（如 svc-8ecfe18f$downloader）。
+    SDK 的 invoke_function 内部 percent_encode 会把 $ 当作查询参数分隔符，
+    导致函数名被截断成 "svc-8ecfe18f" 而报 FunctionNotFound，因此这里手动把
+    $ 编码为 %24，并直接用 call_api 调用自定义 pathname。
+    """
+    from alibabacloud_tea_openapi import utils_models as open_api_util_models
+    from alibabacloud_tea_util import models as util_models
+
     client = _get_fc_client()
     if client is None:
         raise RuntimeError("函数计算客户端未初始化")
-    
+
     payload = json.dumps({"url": url}).encode("utf-8")
-    
-    code_location = fc_models.InputCodeLocation()  # 不需要
-    req = fc_models.InvokeFunctionRequest(
-        body=payload
+
+    func_enc = FC_FUNCTION_NAME.replace("$", "%24")
+    params = open_api_util_models.Params(
+        action="InvokeFunction",
+        version="2023-03-30",
+        protocol="HTTPS",
+        pathname=f"/2023-03-30/functions/{func_enc}/invocations",
+        method="POST",
+        auth_type="AK",
+        style="ROA",
+        req_body_type="json",
+        body_type="binary",
     )
-    
-    resp = client.invoke_function(FC_FUNCTION_NAME, req)
-    
-    # 解析响应
-    body = resp.body.read().decode("utf-8") if hasattr(resp.body, 'read') else str(resp.body)
-    
+    req = open_api_util_models.OpenApiRequest(
+        headers={"x-fc-invocation-type": "Sync", "x-fc-log-type": "None"},
+        query={},
+        body=payload,
+        stream=payload,
+    )
+    runtime = util_models.RuntimeOptions(connect_timeout=30000, read_timeout=600000)
+    resp = client.call_api(params, req, runtime)
+
+    # 解析响应（body 可能是 bytes 或可读流）
+    raw_body = resp.get("body")
+    if isinstance(raw_body, bytes):
+        body = raw_body.decode("utf-8", "ignore")
+    elif hasattr(raw_body, "read"):
+        body = raw_body.read().decode("utf-8", "ignore")
+    else:
+        body = str(raw_body)
+
     try:
         result = json.loads(body)
     except json.JSONDecodeError:
         raise RuntimeError(f"函数计算返回非 JSON: {body[:500]}")
-    
+
     # 函数计算的响应可能嵌套在 body 字段中
     if "body" in result and isinstance(result["body"], str):
         try:
             result = json.loads(result["body"])
         except json.JSONDecodeError:
             pass
-    
+
     if result.get("statusCode", 200) != 200:
         raise RuntimeError(f"函数计算错误: {result.get('error', result)}")
-    
+
     if not result.get("success"):
         raise RuntimeError(f"函数计算下载失败: {result.get('error', 'unknown error')}")
-    
+
     return result
 
 

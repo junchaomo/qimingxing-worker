@@ -96,6 +96,7 @@ def handler(event, context):
             # Bilibili 专用：官方 API 获取音频流（yt-dlp 请求特征会被 Bilibili 412 风控）
             logger_info("Bilibili 链接，用官方 API 下载: " + url)
             audio_path = _download_bilibili(url, workdir)
+            file_ext = '.m4s'
         else:
             # 视频平台链接：用 yt-dlp 下载
             logger_info("视频平台链接，用 yt-dlp 下载: " + url)

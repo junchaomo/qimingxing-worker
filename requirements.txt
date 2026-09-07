@@ -8,3 +8,4 @@ oss2>=2.18.0                  # 阿里云 OSS（Filetrans 音频中转）
 yt-dlp>=2024.1.0              # 视频/音频链接下载（YouTube、Bilibili 等）
 alibabacloud_fc20230330>=4.0.0  # 阿里云函数计算 SDK（调用下载服务）
 alibabacloud_tea_openapi>=0.3.0  # 阿里云通用 SDK
+alibabacloud_tea_util>=0.3.0        # 阿里云 Tea 运行时（FC 调用 RuntimeOptions）
