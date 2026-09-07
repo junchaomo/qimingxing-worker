@@ -262,7 +262,6 @@ def _download_local(url: str, workdir: str) -> tuple[str, float]:
         "-o", output_template,
         "--no-playlist",
         "--max-filesize", "500M",
-        "--no-thumbnails",
         "--no-check-certificate",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
