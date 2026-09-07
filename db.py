@@ -101,10 +101,11 @@ def mark_task_failed(task_id: str, message: str) -> None:
 
 def update_task_title_brief(task_id: str, title: str | None, brief: str | None) -> None:
     with get_conn() as conn:
-        conn.execute(
-            "update transcription_tasks set title=%s, brief=%s where id=%s",
-            (title, brief, task_id),
-        )
+        with conn.transaction():
+            conn.execute(
+                "update transcription_tasks set title=%s, brief=%s where id=%s",
+                (title, brief, task_id),
+            )
 
 
 def mark_task_completed(task_id: str, result_text: str, result_srt: str, total_segments: int) -> None:
